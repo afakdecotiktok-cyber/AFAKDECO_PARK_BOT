@@ -1,0 +1,8 @@
+services:
+  - type: web
+    name: afakdeco-park-bot
+    env: python
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot_with_web.py
+    pythonVersion: 3.11.9
