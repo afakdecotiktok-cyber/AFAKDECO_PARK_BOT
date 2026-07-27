@@ -11,7 +11,7 @@ from flask import Flask
 from openpyxl import Workbook
 from openpyxl.styles import Font
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo, InputMediaAudio
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -134,6 +134,13 @@ def update_problem_status(problem_id: int, status: str = None, ruglee: str = Non
     conn.commit()
     conn.close()
 
+def delete_problem(problem_id: int):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("DELETE FROM problems WHERE id=?", (problem_id,))
+    conn.commit()
+    conn.close()
+
 def get_problem(problem_id: int) -> dict | None:
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -190,12 +197,10 @@ def generate_excel() -> BytesIO:
     wb = Workbook()
     ws = wb.active
     ws.title = "المشاكل"
-    # Headers
     headers = ["التاريخ", "السائق", "المركبة", "المشكلة", "نوع الوسائط", "الحالة", "تم الإصلاح"]
     for col, header in enumerate(headers, 1):
         cell = ws.cell(row=1, column=col, value=header)
         cell.font = Font(bold=True)
-    # Data
     for row_idx, p in enumerate(problems, 2):
         ws.cell(row=row_idx, column=1, value=p["date"])
         ws.cell(row=row_idx, column=2, value=p["driver_name"])
@@ -204,7 +209,6 @@ def generate_excel() -> BytesIO:
         ws.cell(row=row_idx, column=5, value=p["media_type"] or "—")
         ws.cell(row=row_idx, column=6, value=p["status"])
         ws.cell(row=row_idx, column=7, value=p["ruglee"])
-    # Auto-size columns (approximate)
     for col in ws.columns:
         max_length = 0
         col_letter = col[0].column_letter
@@ -236,7 +240,7 @@ async def send_excel_to_group(context: ContextTypes.DEFAULT_TYPE):
         logging.error(f"Failed to send Excel: {e}")
 
 # ----------------------------------------------------------------------
-# Media group handling (albums) – supports photo/video/audio mixed?
+# Media group handling (albums) – supports photo/video only
 # ----------------------------------------------------------------------
 media_groups = {}
 
@@ -272,23 +276,9 @@ async def forward_media_group(context: ContextTypes.DEFAULT_TYPE, group_id: str)
                 media_list.append(InputMediaVideo(media=fid, caption=header))
             else:
                 media_list.append(InputMediaVideo(media=fid))
-        elif msg.voice:
-            fid = msg.voice.file_id
-            media_types.append("صوت")
-            # Voice can't be sent as InputMediaAudio in album, so we'll forward it separately
-            # Actually, for voice in album we'll treat specially by sending as separate audio after album?
-            # Since albums rarely contain voice, we'll handle voice by sending it separately outside album.
-            # For simplicity, skip voice in album logic or send as audio.
-            # We'll forward voice outside album.
-            # Instead of complicated handling, we'll just forward voice individually later.
-            pass
 
-    # If album had voices, we'll need to forward them separately after the media group (if any).
-    # Simplified: we'll assume albums consist only of photos/videos. For safety, if voice exists, we'll forward it separately.
-    # We'll implement a robust but simple approach: if there's any voice, we won't send album but forward each voice individually.
     if media_list:
         sent_msgs = await context.bot.send_media_group(chat_id=ADMIN_GROUP_ID, media=media_list)
-        # Attach buttons to first message
         problem_id = add_problem(user_id, driver["name"], driver["vehicle"], problem_text, ", ".join(media_types))
         keyboard = build_problem_keyboard(problem_id)
         if sent_msgs:
@@ -297,18 +287,18 @@ async def forward_media_group(context: ContextTypes.DEFAULT_TYPE, group_id: str)
             except:
                 pass
         await send_excel_to_group(context)
-    else:
-        # Only voice(s) in album – treat them individually (forward_media_group would not be called for pure voice group in current filter)
-        pass
 
 # ----------------------------------------------------------------------
-# Build inline keyboard for problem (Valide + Ruglee)
+# Build inline keyboard for problem (Valide + Ruglee + Delete)
 # ----------------------------------------------------------------------
 def build_problem_keyboard(problem_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("✅ صحيح", callback_data=f"val_{problem_id}"),
             InlineKeyboardButton("🔧 تم الإصلاح", callback_data=f"rug_{problem_id}")
+        ],
+        [
+            InlineKeyboardButton("🗑️ حذف المشكلة", callback_data=f"del_{problem_id}")
         ]
     ])
 
@@ -354,12 +344,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if state == "vehicle_selection":
-        # In case the user typed something instead of clicking a button
         await update.message.reply_text("الرجاء اختيار المركبة من الأزرار أدناه، أو اضغط 'أخرى' لإدخال رمز مخصص.")
         return
 
     if state == "custom_vehicle_entry":
-        # Store custom vehicle code
         set_driver(user_id, vehicle=text, state="idle")
         await update.message.reply_text(
             f"تم تعيين المركبة إلى {text}.\nملفك مكتمل. يمكنك الآن إرسال بلاغات الأعطال.\n"
@@ -367,7 +355,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Otherwise state = idle -> problem report
+    # Problem report
     if driver and driver["name"] and driver["vehicle"]:
         problem_id = add_problem(user_id, driver["name"], driver["vehicle"], text, "")
         report_text = f"السائق: {driver['name']}\nالمركبة: {driver['vehicle']}\nالمشكلة: {text}"
@@ -425,7 +413,6 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         return
 
-    # Send updated Excel
     await send_excel_to_group(context)
 
 async def handle_album_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -468,7 +455,7 @@ async def handle_vehicle_callback(update: Update, context: ContextTypes.DEFAULT_
         )
 
 # ----------------------------------------------------------------------
-# Valide / Ruglee toggle callbacks
+# Valide / Ruglee / Delete callbacks
 # ----------------------------------------------------------------------
 async def toggle_valide(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -476,24 +463,24 @@ async def toggle_valide(update: Update, context: ContextTypes.DEFAULT_TYPE):
     problem_id = int(query.data.split("_")[1])
     problem = get_problem(problem_id)
     if not problem:
-        await query.edit_message_text("المشكلة غير موجودة.")
+        await query.answer("المشكلة غير موجودة.")
         return
 
     new_status = "صحيح" if problem["status"] == "غير صحيح" else "غير صحيح"
     update_problem_status(problem_id, status=new_status)
 
-    # Update button text
-    button_text = "✅ صحيح" if new_status == "غير صحيح" else "❌ غير صحيح"
-    # We keep the other button unchanged; we need to rebuild the full keyboard
-    other_button = InlineKeyboardButton(
-        "🔧 تم الإصلاح" if problem["ruglee"] == "غير مُصلح" else "🔄 لم يتم الإصلاح",
-        callback_data=f"rug_{problem_id}"
-    )
-    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(button_text, callback_data=f"val_{problem_id}"), other_button]])
+    # Rebuild keyboard with updated text for this button
+    val_text = "✅ صحيح" if new_status == "غير صحيح" else "❌ غير صحيح"
+    rug_text = "🔧 تم الإصلاح" if problem["ruglee"] == "غير مُصلح" else "🔄 لم يتم الإصلاح"
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(val_text, callback_data=f"val_{problem_id}"),
+         InlineKeyboardButton(rug_text, callback_data=f"rug_{problem_id}")],
+        [InlineKeyboardButton("🗑️ حذف المشكلة", callback_data=f"del_{problem_id}")]
+    ])
     try:
         await query.edit_message_reply_markup(reply_markup=keyboard)
-    except:
-        pass
+    except Exception as e:
+        logging.error(f"Edit markup error: {e}")
 
     await send_excel_to_group(context)
 
@@ -503,22 +490,47 @@ async def toggle_ruglee(update: Update, context: ContextTypes.DEFAULT_TYPE):
     problem_id = int(query.data.split("_")[1])
     problem = get_problem(problem_id)
     if not problem:
-        await query.edit_message_text("المشكلة غير موجودة.")
+        await query.answer("المشكلة غير موجودة.")
         return
 
     new_ruglee = "تم الإصلاح" if problem["ruglee"] == "غير مُصلح" else "غير مُصلح"
     update_problem_status(problem_id, ruglee=new_ruglee)
 
-    button_text = "🔧 تم الإصلاح" if new_ruglee == "غير مُصلح" else "🔄 لم يتم الإصلاح"
-    other_button = InlineKeyboardButton(
-        "✅ صحيح" if problem["status"] == "غير صحيح" else "❌ غير صحيح",
-        callback_data=f"val_{problem_id}"
-    )
-    keyboard = InlineKeyboardMarkup([[other_button, InlineKeyboardButton(button_text, callback_data=f"rug_{problem_id}")]])
+    rug_text = "🔧 تم الإصلاح" if new_ruglee == "غير مُصلح" else "🔄 لم يتم الإصلاح"
+    val_text = "✅ صحيح" if problem["status"] == "غير صحيح" else "❌ غير صحيح"
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(val_text, callback_data=f"val_{problem_id}"),
+         InlineKeyboardButton(rug_text, callback_data=f"rug_{problem_id}")],
+        [InlineKeyboardButton("🗑️ حذف المشكلة", callback_data=f"del_{problem_id}")]
+    ])
     try:
         await query.edit_message_reply_markup(reply_markup=keyboard)
-    except:
-        pass
+    except Exception as e:
+        logging.error(f"Edit markup error: {e}")
+
+    await send_excel_to_group(context)
+
+async def delete_problem_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    problem_id = int(query.data.split("_")[1])
+    problem = get_problem(problem_id)
+    if not problem:
+        await query.edit_message_text("المشكلة غير موجودة.")
+        return
+
+    delete_problem(problem_id)
+    # Edit the message to indicate deletion, remove keyboard
+    try:
+        # Keep the original text but replace caption with note
+        original_text = query.message.text or query.message.caption or ""
+        new_text = f"🗑️ تم حذف المشكلة\n( {original_text} )"
+        if query.message.text:
+            await query.edit_message_text(new_text)
+        else:
+            await query.edit_message_caption(caption=new_text)
+    except Exception as e:
+        logging.error(f"Could not edit message after delete: {e}")
 
     await send_excel_to_group(context)
 
@@ -540,18 +552,14 @@ async def scheduled_excel(context: ContextTypes.DEFAULT_TYPE):
     await send_excel_to_group(context)
 
 def schedule_excel_job(app: Application):
-    # Run every 3 days at 7:30 AM. We'll compute the first occurrence.
     now = datetime.now()
     target_time = time(7, 30, 0)
     next_run = datetime.combine(now.date(), target_time)
-    # If it's already past 7:30 today, start tomorrow
     if now >= next_run:
         next_run += timedelta(days=1)
-    # Then find the next day that satisfies the 3-day interval (starting from that first time)
-    # Since we'll use run_repeating with interval 3 days, the first run will be at next_run.
     app.job_queue.run_repeating(
         scheduled_excel,
-        interval=3 * 24 * 60 * 60,  # 3 days in seconds
+        interval=3 * 24 * 60 * 60,  # 3 days
         first=next_run
     )
 
@@ -604,6 +612,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_vehicle_callback, pattern="^veh_"))
     app.add_handler(CallbackQueryHandler(toggle_valide, pattern="^val_"))
     app.add_handler(CallbackQueryHandler(toggle_ruglee, pattern="^rug_"))
+    app.add_handler(CallbackQueryHandler(delete_problem_handler, pattern="^del_"))
     app.add_error_handler(error_handler)
 
     # Schedule Excel every 3 days at 7:30 AM
