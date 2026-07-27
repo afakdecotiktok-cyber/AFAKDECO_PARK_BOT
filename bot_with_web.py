@@ -1,4 +1,5 @@
 import os
+import sys
 import sqlite3
 import logging
 import threading
@@ -15,23 +16,40 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# --- Flask app for Render "always on" pinging ---
+# ----------------------------------------------------------------------
+# Flask app – runs in a daemon thread so the main thread can run the bot
+# ----------------------------------------------------------------------
 web_app = Flask(__name__)
 
 @web_app.route('/')
 def home():
     return "Bot is running."
 
-# --- Configuration ---
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-ADMIN_GROUP_ID = int(os.environ["ADMIN_GROUP_ID"])
+# ----------------------------------------------------------------------
+# Configuration – must be set as environment variables on Render
+# ----------------------------------------------------------------------
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+ADMIN_GROUP_ID_STR = os.environ.get("ADMIN_GROUP_ID")
 
-# --- Vehicle list ---
+if not BOT_TOKEN:
+    sys.exit("FATAL: BOT_TOKEN environment variable not set.")
+if not ADMIN_GROUP_ID_STR:
+    sys.exit("FATAL: ADMIN_GROUP_ID environment variable not set.")
+try:
+    ADMIN_GROUP_ID = int(ADMIN_GROUP_ID_STR)
+except ValueError:
+    sys.exit("FATAL: ADMIN_GROUP_ID must be an integer (e.g. -1004417485510).")
+
+# ----------------------------------------------------------------------
+# Vehicle list
+# ----------------------------------------------------------------------
 VEHICLES = ["F01", "F02", "H01"] + \
            [f"M{i:02d}" for i in range(1, 32)] + \
            ["LOGAN"]
 
-# --- Database setup ---
+# ----------------------------------------------------------------------
+# Database setup (SQLite)
+# ----------------------------------------------------------------------
 DB_NAME = "drivers.db"
 
 def init_db():
@@ -85,7 +103,9 @@ def vehicle_keyboard() -> InlineKeyboardMarkup:
     rows = [buttons[i:i+5] for i in range(0, len(buttons), 5)]
     return InlineKeyboardMarkup(rows)
 
-# --- Media group handling ---
+# ----------------------------------------------------------------------
+# Media group handling (for albums)
+# ----------------------------------------------------------------------
 media_groups = {}
 
 async def forward_media_group(context: ContextTypes.DEFAULT_TYPE, group_id: str):
@@ -123,7 +143,9 @@ async def forward_media_group(context: ContextTypes.DEFAULT_TYPE, group_id: str)
     if media_list:
         await context.bot.send_media_group(chat_id=ADMIN_GROUP_ID, media=media_list)
 
-# --- Handlers ---
+# ----------------------------------------------------------------------
+# Bot command handlers
+# ----------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     driver = get_driver(user_id)
@@ -229,13 +251,29 @@ async def handle_vehicle_callback(update: Update, context: ContextTypes.DEFAULT_
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logging.error(msg="Exception while handling an update:", exc_info=context.error)
 
+# ----------------------------------------------------------------------
+# Main – runs the bot in the main thread (Flask is in a daemon thread)
+# ----------------------------------------------------------------------
 def main():
-    logging.basicConfig(level=logging.INFO)
+    # Fix for Python 3.14: explicitly create and set an event loop in the main thread
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s"
+    )
+    logging.info("Starting bot...")
     init_db()
 
-    # Build the bot application
-    app = Application.builder().token(BOT_TOKEN).build()
+    # Build the Application
+    try:
+        app = Application.builder().token(BOT_TOKEN).build()
+    except Exception as e:
+        logging.critical(f"Failed to build Application: {e}")
+        sys.exit(1)
 
+    # Add handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("changename", change_name))
     app.add_handler(CommandHandler("changevehicle", change_vehicle))
@@ -251,18 +289,25 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_vehicle_callback, pattern="^veh_"))
     app.add_error_handler(error_handler)
 
-    print("Bot polling started...")
-    # Run the bot (this call blocks forever)
+    logging.info("Bot polling started...")
+    # stop_signals=[] prevents issues with signal handling in certain environments
     app.run_polling(stop_signals=[])
 
 if __name__ == "__main__":
-    # Start Flask in a daemon thread so the main thread can run the bot
+    # Start Flask in a daemon thread so it doesn't block the bot
+    port = int(os.environ.get("PORT", 5000))
     flask_thread = threading.Thread(
-        target=lambda: web_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000))),
+        target=lambda: web_app.run(host="0.0.0.0", port=port),
         daemon=True
     )
     flask_thread.start()
-    print("Flask server started on port", os.environ.get("PORT", 5000))
+    logging.info(f"Flask server started on port {port}")
 
-    # Run the bot in the main thread
-    main()
+    # Run the bot (main thread)
+    try:
+        main()
+    except KeyboardInterrupt:
+        logging.info("Bot stopped by user.")
+    except Exception as e:
+        logging.critical(f"Unhandled exception in main: {e}", exc_info=True)
+        sys.exit(1)
