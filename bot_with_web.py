@@ -35,6 +35,7 @@ def home():
 # ----------------------------------------------------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_GROUP_ID_STR = os.environ.get("ADMIN_GROUP_ID")
+ADMIN_IDS_STR = os.environ.get("ADMIN_IDS", "")  # Comma-separated list of admin user IDs
 
 if not BOT_TOKEN:
     sys.exit("FATAL: BOT_TOKEN environment variable not set.")
@@ -44,6 +45,14 @@ try:
     ADMIN_GROUP_ID = int(ADMIN_GROUP_ID_STR)
 except ValueError:
     sys.exit("FATAL: ADMIN_GROUP_ID must be an integer (e.g. -1004417485510).")
+
+# Parse admin IDs
+ADMIN_IDS = set()
+if ADMIN_IDS_STR:
+    for uid in ADMIN_IDS_STR.split(","):
+        uid = uid.strip()
+        if uid.isdigit():
+            ADMIN_IDS.add(int(uid))
 
 # ----------------------------------------------------------------------
 # Vehicle list – fixed list + dynamic "أخرى" option
@@ -73,6 +82,11 @@ def init_db():
                     date TEXT,
                     status TEXT DEFAULT 'غير صحيح',
                     ruglee TEXT DEFAULT 'غير مُصلح')''')
+    # Add comments column if it doesn't exist (SQLite 3.35+)
+    try:
+        c.execute("ALTER TABLE problems ADD COLUMN comments TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass  # column already exists
     conn.commit()
     conn.close()
 
@@ -134,6 +148,13 @@ def update_problem_status(problem_id: int, status: str = None, ruglee: str = Non
     conn.commit()
     conn.close()
 
+def set_problem_comment(problem_id: int, comment: str):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("UPDATE problems SET comments=? WHERE id=?", (comment, problem_id))
+    conn.commit()
+    conn.close()
+
 def delete_problem(problem_id: int):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -144,7 +165,7 @@ def delete_problem(problem_id: int):
 def get_problem(problem_id: int) -> dict | None:
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    c.execute("SELECT id, driver_name, vehicle, problem_text, media_type, date, status, ruglee FROM problems WHERE id=?", (problem_id,))
+    c.execute("SELECT id, driver_name, vehicle, problem_text, media_type, date, status, ruglee, comments FROM problems WHERE id=?", (problem_id,))
     row = c.fetchone()
     conn.close()
     if row:
@@ -156,14 +177,15 @@ def get_problem(problem_id: int) -> dict | None:
             "media_type": row[4],
             "date": row[5],
             "status": row[6],
-            "ruglee": row[7]
+            "ruglee": row[7],
+            "comments": row[8] or ""
         }
     return None
 
 def get_all_problems() -> list:
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    c.execute("SELECT id, driver_name, vehicle, problem_text, media_type, date, status, ruglee FROM problems ORDER BY date DESC")
+    c.execute("SELECT id, driver_name, vehicle, problem_text, media_type, date, status, ruglee, comments FROM problems ORDER BY date DESC")
     rows = c.fetchall()
     conn.close()
     return [
@@ -175,7 +197,8 @@ def get_all_problems() -> list:
             "media_type": r[4],
             "date": r[5],
             "status": r[6],
-            "ruglee": r[7]
+            "ruglee": r[7],
+            "comments": r[8] or ""
         }
         for r in rows
     ]
@@ -190,14 +213,14 @@ def vehicle_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 # ----------------------------------------------------------------------
-# Excel generation with Arabic columns
+# Excel generation with Arabic columns (including comments)
 # ----------------------------------------------------------------------
 def generate_excel() -> BytesIO:
     problems = get_all_problems()
     wb = Workbook()
     ws = wb.active
     ws.title = "المشاكل"
-    headers = ["التاريخ", "السائق", "المركبة", "المشكلة", "نوع الوسائط", "الحالة", "تم الإصلاح"]
+    headers = ["التاريخ", "السائق", "المركبة", "المشكلة", "نوع الوسائط", "الحالة", "تم الإصلاح", "تعليقات"]
     for col, header in enumerate(headers, 1):
         cell = ws.cell(row=1, column=col, value=header)
         cell.font = Font(bold=True)
@@ -209,6 +232,7 @@ def generate_excel() -> BytesIO:
         ws.cell(row=row_idx, column=5, value=p["media_type"] or "—")
         ws.cell(row=row_idx, column=6, value=p["status"])
         ws.cell(row=row_idx, column=7, value=p["ruglee"])
+        ws.cell(row=row_idx, column=8, value=p["comments"] or "")
     for col in ws.columns:
         max_length = 0
         col_letter = col[0].column_letter
@@ -289,7 +313,7 @@ async def forward_media_group(context: ContextTypes.DEFAULT_TYPE, group_id: str)
         await send_excel_to_group(context)
 
 # ----------------------------------------------------------------------
-# Build inline keyboard for problem (Valide + Ruglee + Delete)
+# Build inline keyboard for problem (Valide + Ruglee + Comment + Delete)
 # ----------------------------------------------------------------------
 def build_problem_keyboard(problem_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -297,10 +321,14 @@ def build_problem_keyboard(problem_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton("✅ صحيح", callback_data=f"val_{problem_id}"),
             InlineKeyboardButton("🔧 تم الإصلاح", callback_data=f"rug_{problem_id}")
         ],
-        [
-            InlineKeyboardButton("🗑️ حذف المشكلة", callback_data=f"del_{problem_id}")
-        ]
+        [InlineKeyboardButton("💬 تعليق", callback_data=f"com_{problem_id}")],
+        [InlineKeyboardButton("🗑️ حذف المشكلة", callback_data=f"del_{problem_id}")]
     ])
+
+# ----------------------------------------------------------------------
+# Comment sessions (admin writes comment in private chat)
+# ----------------------------------------------------------------------
+comment_sessions = {}  # user_id -> problem_id
 
 # ----------------------------------------------------------------------
 # Bot command & message handlers (Arabic)
@@ -335,6 +363,16 @@ async def my_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text
+
+    # ---------- Admin comment session ----------
+    if user_id in comment_sessions:
+        problem_id = comment_sessions.pop(user_id)
+        set_problem_comment(problem_id, text)
+        await update.message.reply_text("✅ تم حفظ التعليق بنجاح.")
+        await send_excel_to_group(context)
+        return
+
+    # ---------- Driver state machine ----------
     driver = get_driver(user_id)
     state = driver["state"] if driver else "name_entry"
 
@@ -455,11 +493,18 @@ async def handle_vehicle_callback(update: Update, context: ContextTypes.DEFAULT_
         )
 
 # ----------------------------------------------------------------------
-# Valide / Ruglee / Delete callbacks
+# Admin-only actions: Valide, Ruglee, Comment, Delete
 # ----------------------------------------------------------------------
+async def is_admin(update: Update) -> bool:
+    user_id = update.effective_user.id
+    return user_id in ADMIN_IDS
+
 async def toggle_valide(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    if not await is_admin(update):
+        await query.answer("⛔ غير مصرح لك بهذا الإجراء.", show_alert=True)
+        return
     problem_id = int(query.data.split("_")[1])
     problem = get_problem(problem_id)
     if not problem:
@@ -469,12 +514,12 @@ async def toggle_valide(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_status = "صحيح" if problem["status"] == "غير صحيح" else "غير صحيح"
     update_problem_status(problem_id, status=new_status)
 
-    # Rebuild keyboard with updated text for this button
     val_text = "✅ صحيح" if new_status == "غير صحيح" else "❌ غير صحيح"
     rug_text = "🔧 تم الإصلاح" if problem["ruglee"] == "غير مُصلح" else "🔄 لم يتم الإصلاح"
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(val_text, callback_data=f"val_{problem_id}"),
          InlineKeyboardButton(rug_text, callback_data=f"rug_{problem_id}")],
+        [InlineKeyboardButton("💬 تعليق", callback_data=f"com_{problem_id}")],
         [InlineKeyboardButton("🗑️ حذف المشكلة", callback_data=f"del_{problem_id}")]
     ])
     try:
@@ -487,6 +532,9 @@ async def toggle_valide(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def toggle_ruglee(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    if not await is_admin(update):
+        await query.answer("⛔ غير مصرح لك بهذا الإجراء.", show_alert=True)
+        return
     problem_id = int(query.data.split("_")[1])
     problem = get_problem(problem_id)
     if not problem:
@@ -501,6 +549,7 @@ async def toggle_ruglee(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(val_text, callback_data=f"val_{problem_id}"),
          InlineKeyboardButton(rug_text, callback_data=f"rug_{problem_id}")],
+        [InlineKeyboardButton("💬 تعليق", callback_data=f"com_{problem_id}")],
         [InlineKeyboardButton("🗑️ حذف المشكلة", callback_data=f"del_{problem_id}")]
     ])
     try:
@@ -510,9 +559,33 @@ async def toggle_ruglee(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await send_excel_to_group(context)
 
+async def comment_problem(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not await is_admin(update):
+        await query.answer("⛔ غير مصرح لك بهذا الإجراء.", show_alert=True)
+        return
+    problem_id = int(query.data.split("_")[1])
+    problem = get_problem(problem_id)
+    if not problem:
+        await query.answer("المشكلة غير موجودة.")
+        return
+
+    user_id = update.effective_user.id
+    comment_sessions[user_id] = problem_id
+    # Ask admin to send comment privately
+    await context.bot.send_message(
+        chat_id=user_id,
+        text=f"📝 أرسل تعليقك على المشكلة رقم {problem_id} (نص فقط):"
+    )
+    await query.answer("تم تفعيل وضع التعليق. أرسل التعليق في المحادثة الخاصة.", show_alert=True)
+
 async def delete_problem_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    if not await is_admin(update):
+        await query.answer("⛔ غير مصرح لك بهذا الإجراء.", show_alert=True)
+        return
     problem_id = int(query.data.split("_")[1])
     problem = get_problem(problem_id)
     if not problem:
@@ -520,11 +593,9 @@ async def delete_problem_handler(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     delete_problem(problem_id)
-    # Edit the message to indicate deletion, remove keyboard
+    original_text = query.message.text or query.message.caption or ""
+    new_text = f"🗑️ تم حذف المشكلة\n( {original_text} )"
     try:
-        # Keep the original text but replace caption with note
-        original_text = query.message.text or query.message.caption or ""
-        new_text = f"🗑️ تم حذف المشكلة\n( {original_text} )"
         if query.message.text:
             await query.edit_message_text(new_text)
         else:
@@ -612,6 +683,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_vehicle_callback, pattern="^veh_"))
     app.add_handler(CallbackQueryHandler(toggle_valide, pattern="^val_"))
     app.add_handler(CallbackQueryHandler(toggle_ruglee, pattern="^rug_"))
+    app.add_handler(CallbackQueryHandler(comment_problem, pattern="^com_"))
     app.add_handler(CallbackQueryHandler(delete_problem_handler, pattern="^del_"))
     app.add_error_handler(error_handler)
 
