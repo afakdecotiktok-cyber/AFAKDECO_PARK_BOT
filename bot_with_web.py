@@ -4,7 +4,7 @@ import logging
 import threading
 from flask import Flask
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -110,15 +110,15 @@ async def forward_media_group(context: ContextTypes.DEFAULT_TYPE, group_id: str)
         if msg.photo:
             file_id = msg.photo[-1].file_id
             if i == 0:
-                media_list.append(telegram.InputMediaPhoto(media=file_id, caption=header))
+                media_list.append(InputMediaPhoto(media=file_id, caption=header))
             else:
-                media_list.append(telegram.InputMediaPhoto(media=file_id))
+                media_list.append(InputMediaPhoto(media=file_id))
         elif msg.video:
             file_id = msg.video.file_id
             if i == 0:
-                media_list.append(telegram.InputMediaVideo(media=file_id, caption=header))
+                media_list.append(InputMediaVideo(media=file_id, caption=header))
             else:
-                media_list.append(telegram.InputMediaVideo(media=file_id))
+                media_list.append(InputMediaVideo(media=file_id))
     if media_list:
         await context.bot.send_media_group(chat_id=ADMIN_GROUP_ID, media=media_list)
 
