@@ -255,7 +255,7 @@ def run_bot():
     app.add_error_handler(error_handler)
 
     print("Bot polling started...")
-    app.run_polling()
+    app.run_polling(stop_signals=[])
 
 if __name__ == "__main__":
     # Start the Telegram bot in a background thread
