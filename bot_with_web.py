@@ -229,14 +229,11 @@ async def handle_vehicle_callback(update: Update, context: ContextTypes.DEFAULT_
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logging.error(msg="Exception while handling an update:", exc_info=context.error)
 
-def run_bot():
-    # Fix for Python 3.14 + python-telegram-bot v21.x: create an event loop in this thread
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
+def main():
     logging.basicConfig(level=logging.INFO)
     init_db()
 
+    # Build the bot application
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -255,11 +252,17 @@ def run_bot():
     app.add_error_handler(error_handler)
 
     print("Bot polling started...")
+    # Run the bot (this call blocks forever)
     app.run_polling(stop_signals=[])
 
 if __name__ == "__main__":
-    # Start the Telegram bot in a background thread
-    threading.Thread(target=run_bot, daemon=True).start()
-    # Start the Flask web server (required by Render)
-    port = int(os.environ.get("PORT", 5000))
-    web_app.run(host="0.0.0.0", port=port)
+    # Start Flask in a daemon thread so the main thread can run the bot
+    flask_thread = threading.Thread(
+        target=lambda: web_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000))),
+        daemon=True
+    )
+    flask_thread.start()
+    print("Flask server started on port", os.environ.get("PORT", 5000))
+
+    # Run the bot in the main thread
+    main()
