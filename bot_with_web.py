@@ -2,6 +2,7 @@ import os
 import sqlite3
 import logging
 import threading
+import asyncio
 from flask import Flask
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo
@@ -229,6 +230,10 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     logging.error(msg="Exception while handling an update:", exc_info=context.error)
 
 def run_bot():
+    # Fix for Python 3.14 + python-telegram-bot v21.x: create an event loop in this thread
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
     logging.basicConfig(level=logging.INFO)
     init_db()
 
