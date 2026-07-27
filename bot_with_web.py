@@ -46,7 +46,7 @@ try:
 except ValueError:
     sys.exit("FATAL: ADMIN_GROUP_ID must be an integer (e.g. -1004417485510).")
 
-# Parse admin IDs
+# Parse admin IDs (now only used for Delete)
 ADMIN_IDS = set()
 if ADMIN_IDS_STR:
     for uid in ADMIN_IDS_STR.split(","):
@@ -82,7 +82,7 @@ def init_db():
                     date TEXT,
                     status TEXT DEFAULT 'غير صحيح',
                     ruglee TEXT DEFAULT 'غير مُصلح')''')
-    # Add comments column if it doesn't exist (SQLite 3.35+)
+    # Add comments column if it doesn't exist
     try:
         c.execute("ALTER TABLE problems ADD COLUMN comments TEXT DEFAULT ''")
     except sqlite3.OperationalError:
@@ -209,7 +209,7 @@ def get_all_problems() -> list:
 def vehicle_keyboard() -> InlineKeyboardMarkup:
     buttons = [InlineKeyboardButton(v, callback_data=f"veh_{v}") for v in VEHICLES]
     buttons.append(InlineKeyboardButton("➖ أخرى (إدخال يدوي)", callback_data="veh_OTHER"))
-    rows = [buttons[i:i+4] for i in range(0, len(buttons), 4)]  # 4 per row for better layout
+    rows = [buttons[i:i+4] for i in range(0, len(buttons), 4)]
     return InlineKeyboardMarkup(rows)
 
 # ----------------------------------------------------------------------
@@ -249,7 +249,7 @@ def generate_excel() -> BytesIO:
     return output
 
 # ----------------------------------------------------------------------
-# Helper: send Excel to group
+# Helper: send Excel to group (used only by scheduled job)
 # ----------------------------------------------------------------------
 async def send_excel_to_group(context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -258,7 +258,7 @@ async def send_excel_to_group(context: ContextTypes.DEFAULT_TYPE):
             chat_id=ADMIN_GROUP_ID,
             document=excel_file,
             filename="المشاكل.xlsx",
-            caption="📊 أحدث تحديث لملف المشاكل"
+            caption="📊 التحديث الدوري لملف المشاكل"
         )
     except Exception as e:
         logging.error(f"Failed to send Excel: {e}")
@@ -310,7 +310,6 @@ async def forward_media_group(context: ContextTypes.DEFAULT_TYPE, group_id: str)
                 await sent_msgs[0].edit_reply_markup(reply_markup=keyboard)
             except:
                 pass
-        await send_excel_to_group(context)
 
 # ----------------------------------------------------------------------
 # Build inline keyboard for problem (Valide + Ruglee + Comment + Delete)
@@ -326,7 +325,7 @@ def build_problem_keyboard(problem_id: int) -> InlineKeyboardMarkup:
     ])
 
 # ----------------------------------------------------------------------
-# Comment sessions (admin writes comment in private chat)
+# Comment sessions (any user can comment)
 # ----------------------------------------------------------------------
 comment_sessions = {}  # user_id -> problem_id
 
@@ -364,12 +363,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text
 
-    # ---------- Admin comment session ----------
+    # ---------- Comment session (any user) ----------
     if user_id in comment_sessions:
         problem_id = comment_sessions.pop(user_id)
         set_problem_comment(problem_id, text)
         await update.message.reply_text("✅ تم حفظ التعليق بنجاح.")
-        await send_excel_to_group(context)
         return
 
     # ---------- Driver state machine ----------
@@ -402,7 +400,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text=report_text,
             reply_markup=build_problem_keyboard(problem_id)
         )
-        await send_excel_to_group(context)
     else:
         await update.message.reply_text("ملفك غير مكتمل. الرجاء استخدام /start أولاً.")
 
@@ -448,10 +445,6 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             caption=header,
             reply_markup=build_problem_keyboard(problem_id)
         )
-    else:
-        return
-
-    await send_excel_to_group(context)
 
 async def handle_album_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -493,18 +486,11 @@ async def handle_vehicle_callback(update: Update, context: ContextTypes.DEFAULT_
         )
 
 # ----------------------------------------------------------------------
-# Admin-only actions: Valide, Ruglee, Comment, Delete
+# Valider / Ruglee – NOW OPEN TO ALL GROUP MEMBERS (no admin check)
 # ----------------------------------------------------------------------
-async def is_admin(update: Update) -> bool:
-    user_id = update.effective_user.id
-    return user_id in ADMIN_IDS
-
 async def toggle_valide(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if not await is_admin(update):
-        await query.answer("⛔ غير مصرح لك بهذا الإجراء.", show_alert=True)
-        return
     problem_id = int(query.data.split("_")[1])
     problem = get_problem(problem_id)
     if not problem:
@@ -527,14 +513,9 @@ async def toggle_valide(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error(f"Edit markup error: {e}")
 
-    await send_excel_to_group(context)
-
 async def toggle_ruglee(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if not await is_admin(update):
-        await query.answer("⛔ غير مصرح لك بهذا الإجراء.", show_alert=True)
-        return
     problem_id = int(query.data.split("_")[1])
     problem = get_problem(problem_id)
     if not problem:
@@ -557,14 +538,12 @@ async def toggle_ruglee(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error(f"Edit markup error: {e}")
 
-    await send_excel_to_group(context)
-
+# ----------------------------------------------------------------------
+# Comment – open to ALL group users
+# ----------------------------------------------------------------------
 async def comment_problem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if not await is_admin(update):
-        await query.answer("⛔ غير مصرح لك بهذا الإجراء.", show_alert=True)
-        return
     problem_id = int(query.data.split("_")[1])
     problem = get_problem(problem_id)
     if not problem:
@@ -573,17 +552,19 @@ async def comment_problem(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.effective_user.id
     comment_sessions[user_id] = problem_id
-    # Ask admin to send comment privately
     await context.bot.send_message(
         chat_id=user_id,
         text=f"📝 أرسل تعليقك على المشكلة رقم {problem_id} (نص فقط):"
     )
     await query.answer("تم تفعيل وضع التعليق. أرسل التعليق في المحادثة الخاصة.", show_alert=True)
 
+# ----------------------------------------------------------------------
+# Delete – admin-only
+# ----------------------------------------------------------------------
 async def delete_problem_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if not await is_admin(update):
+    if update.effective_user.id not in ADMIN_IDS:
         await query.answer("⛔ غير مصرح لك بهذا الإجراء.", show_alert=True)
         return
     problem_id = int(query.data.split("_")[1])
@@ -603,10 +584,8 @@ async def delete_problem_handler(update: Update, context: ContextTypes.DEFAULT_T
     except Exception as e:
         logging.error(f"Could not edit message after delete: {e}")
 
-    await send_excel_to_group(context)
-
 # ----------------------------------------------------------------------
-# /export command (manual Excel retrieval)
+# /export command (manual Excel retrieval) – available to anyone in the group
 # ----------------------------------------------------------------------
 async def export_excel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     excel_file = generate_excel()
