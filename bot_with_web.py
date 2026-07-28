@@ -1,11 +1,12 @@
 import os
 import sys
-import sqlite3
 import logging
 import threading
 import asyncio
 from datetime import datetime, time, timedelta
 from io import BytesIO
+import psycopg2
+import psycopg2.extras
 
 from flask import Flask
 from openpyxl import Workbook
@@ -31,22 +32,24 @@ def home():
     return "Bot is running."
 
 # ----------------------------------------------------------------------
-# Configuration – must be set as environment variables on Render
+# Configuration – environment variables on Render
 # ----------------------------------------------------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_GROUP_ID_STR = os.environ.get("ADMIN_GROUP_ID")
-ADMIN_IDS_STR = os.environ.get("ADMIN_IDS", "")  # Comma-separated list of admin user IDs
+ADMIN_IDS_STR = os.environ.get("ADMIN_IDS", "")
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
 if not BOT_TOKEN:
     sys.exit("FATAL: BOT_TOKEN environment variable not set.")
 if not ADMIN_GROUP_ID_STR:
     sys.exit("FATAL: ADMIN_GROUP_ID environment variable not set.")
+if not DATABASE_URL:
+    sys.exit("FATAL: DATABASE_URL environment variable not set.")
 try:
     ADMIN_GROUP_ID = int(ADMIN_GROUP_ID_STR)
 except ValueError:
-    sys.exit("FATAL: ADMIN_GROUP_ID must be an integer (e.g. -1004417485510).")
+    sys.exit("FATAL: ADMIN_GROUP_ID must be an integer.")
 
-# Parse admin IDs (only used for Delete)
 ADMIN_IDS = set()
 if ADMIN_IDS_STR:
     for uid in ADMIN_IDS_STR.split(","):
@@ -55,155 +58,135 @@ if ADMIN_IDS_STR:
             ADMIN_IDS.add(int(uid))
 
 # ----------------------------------------------------------------------
-# Vehicle list – fixed list + dynamic "أخرى" option
+# Vehicle list
 # ----------------------------------------------------------------------
 VEHICLES = ["F01", "F02", "H01"] + [f"M{i:02d}" for i in range(1, 32)] + ["LOGAN"]
 
 # ----------------------------------------------------------------------
-# Database setup (SQLite) – drivers + problems
+# Database helper using PostgreSQL
 # ----------------------------------------------------------------------
-DB_NAME = "drivers.db"
+def get_db_conn():
+    # Use a connection per call; in a real production app you'd use a pool,
+    # but for this low traffic it's perfectly fine.
+    return psycopg2.connect(DATABASE_URL, sslmode='require')
 
 def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS drivers (
-                    user_id INTEGER PRIMARY KEY,
-                    name TEXT,
-                    vehicle TEXT,
-                    state TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS problems (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER,
-                    driver_name TEXT,
-                    vehicle TEXT,
-                    problem_text TEXT,
-                    media_type TEXT,
-                    date TEXT,
-                    status TEXT DEFAULT 'قيد الانتظار',
-                    ruglee TEXT DEFAULT 'غير مُصلح')''')
-    try:
-        c.execute("ALTER TABLE problems ADD COLUMN comments TEXT DEFAULT ''")
-    except sqlite3.OperationalError:
-        pass
+    conn = get_db_conn()
+    cur = conn.cursor()
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS drivers (
+            user_id BIGINT PRIMARY KEY,
+            name TEXT,
+            vehicle TEXT,
+            state TEXT
+        )
+    ''')
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS problems (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            driver_name TEXT,
+            vehicle TEXT,
+            problem_text TEXT,
+            media_type TEXT,
+            date TEXT,
+            status TEXT DEFAULT 'قيد الانتظار',
+            ruglee TEXT DEFAULT 'غير مُصلح',
+            comments TEXT DEFAULT ''
+        )
+    ''')
     conn.commit()
+    cur.close()
     conn.close()
 
 def get_driver(user_id: int) -> dict | None:
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT name, vehicle, state FROM drivers WHERE user_id=?", (user_id,))
-    row = c.fetchone()
+    conn = get_db_conn()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("SELECT name, vehicle, state FROM drivers WHERE user_id = %s", (user_id,))
+    row = cur.fetchone()
+    cur.close()
     conn.close()
-    if row:
-        return {"name": row[0], "vehicle": row[1], "state": row[2]}
-    return None
+    return dict(row) if row else None
 
 def set_driver(user_id: int, name: str = None, vehicle: str = None, state: str = None):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
+    conn = get_db_conn()
+    cur = conn.cursor()
     driver = get_driver(user_id)
     if driver:
-        fields = []
-        values = []
         if name is not None:
-            fields.append("name=?")
-            values.append(name)
+            cur.execute("UPDATE drivers SET name = %s WHERE user_id = %s", (name, user_id))
         if vehicle is not None:
-            fields.append("vehicle=?")
-            values.append(vehicle)
+            cur.execute("UPDATE drivers SET vehicle = %s WHERE user_id = %s", (vehicle, user_id))
         if state is not None:
-            fields.append("state=?")
-            values.append(state)
-        if fields:
-            c.execute(f"UPDATE drivers SET {', '.join(fields)} WHERE user_id=?",
-                      tuple(values) + (user_id,))
+            cur.execute("UPDATE drivers SET state = %s WHERE user_id = %s", (state, user_id))
     else:
-        c.execute("INSERT INTO drivers (user_id, name, vehicle, state) VALUES (?,?,?,?)",
-                  (user_id, name or "", vehicle or "", state or "name_entry"))
+        cur.execute("INSERT INTO drivers (user_id, name, vehicle, state) VALUES (%s,%s,%s,%s)",
+                    (user_id, name or "", vehicle or "", state or "name_entry"))
     conn.commit()
+    cur.close()
     conn.close()
 
 def add_problem(user_id: int, driver_name: str, vehicle: str, problem_text: str, media_type: str) -> int:
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
+    conn = get_db_conn()
+    cur = conn.cursor()
     date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    c.execute(
-        "INSERT INTO problems (user_id, driver_name, vehicle, problem_text, media_type, date) VALUES (?,?,?,?,?,?)",
+    cur.execute(
+        "INSERT INTO problems (user_id, driver_name, vehicle, problem_text, media_type, date) VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
         (user_id, driver_name, vehicle, problem_text, media_type, date)
     )
-    problem_id = c.lastrowid
+    problem_id = cur.fetchone()[0]
     conn.commit()
+    cur.close()
     conn.close()
     return problem_id
 
 def update_problem_status(problem_id: int, status: str = None, ruglee: str = None):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
+    conn = get_db_conn()
+    cur = conn.cursor()
     if status is not None:
-        c.execute("UPDATE problems SET status=? WHERE id=?", (status, problem_id))
+        cur.execute("UPDATE problems SET status = %s WHERE id = %s", (status, problem_id))
     if ruglee is not None:
-        c.execute("UPDATE problems SET ruglee=? WHERE id=?", (ruglee, problem_id))
+        cur.execute("UPDATE problems SET ruglee = %s WHERE id = %s", (ruglee, problem_id))
     conn.commit()
+    cur.close()
     conn.close()
 
 def set_problem_comment(problem_id: int, comment: str):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("UPDATE problems SET comments=? WHERE id=?", (comment, problem_id))
+    conn = get_db_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE problems SET comments = %s WHERE id = %s", (comment, problem_id))
     conn.commit()
+    cur.close()
     conn.close()
 
 def delete_problem(problem_id: int):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("DELETE FROM problems WHERE id=?", (problem_id,))
+    conn = get_db_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM problems WHERE id = %s", (problem_id,))
     conn.commit()
+    cur.close()
     conn.close()
 
 def get_problem(problem_id: int) -> dict | None:
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT id, driver_name, vehicle, problem_text, media_type, date, status, ruglee, comments FROM problems WHERE id=?", (problem_id,))
-    row = c.fetchone()
+    conn = get_db_conn()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("SELECT id, driver_name, vehicle, problem_text, media_type, date, status, ruglee, comments FROM problems WHERE id = %s", (problem_id,))
+    row = cur.fetchone()
+    cur.close()
     conn.close()
-    if row:
-        return {
-            "id": row[0],
-            "driver_name": row[1],
-            "vehicle": row[2],
-            "problem_text": row[3],
-            "media_type": row[4],
-            "date": row[5],
-            "status": row[6],
-            "ruglee": row[7],
-            "comments": row[8] or ""
-        }
-    return None
+    return dict(row) if row else None
 
 def get_all_problems() -> list:
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT id, driver_name, vehicle, problem_text, media_type, date, status, ruglee, comments FROM problems ORDER BY date DESC")
-    rows = c.fetchall()
+    conn = get_db_conn()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("SELECT id, driver_name, vehicle, problem_text, media_type, date, status, ruglee, comments FROM problems ORDER BY date DESC")
+    rows = cur.fetchall()
+    cur.close()
     conn.close()
-    return [
-        {
-            "id": r[0],
-            "driver_name": r[1],
-            "vehicle": r[2],
-            "problem_text": r[3],
-            "media_type": r[4],
-            "date": r[5],
-            "status": r[6],
-            "ruglee": r[7],
-            "comments": r[8] or ""
-        }
-        for r in rows
-    ]
+    return [dict(r) for r in rows]
 
 # ----------------------------------------------------------------------
-# Vehicle keyboard with "أخرى" option
+# Vehicle keyboard
 # ----------------------------------------------------------------------
 def vehicle_keyboard() -> InlineKeyboardMarkup:
     buttons = [InlineKeyboardButton(v, callback_data=f"veh_{v}") for v in VEHICLES]
@@ -212,7 +195,7 @@ def vehicle_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 # ----------------------------------------------------------------------
-# Excel generation with Arabic columns
+# Excel generation
 # ----------------------------------------------------------------------
 def generate_excel() -> BytesIO:
     problems = get_all_problems()
@@ -248,7 +231,7 @@ def generate_excel() -> BytesIO:
     return output
 
 # ----------------------------------------------------------------------
-# Helper: send Excel to group (used only by scheduled job)
+# Send Excel to group (used by scheduled job)
 # ----------------------------------------------------------------------
 async def send_excel_to_group(context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -263,7 +246,7 @@ async def send_excel_to_group(context: ContextTypes.DEFAULT_TYPE):
         logging.error(f"Failed to send Excel: {e}")
 
 # ----------------------------------------------------------------------
-# Media group handling (albums) – photo/video only
+# Media group handling
 # ----------------------------------------------------------------------
 media_groups = {}
 
@@ -311,10 +294,9 @@ async def forward_media_group(context: ContextTypes.DEFAULT_TYPE, group_id: str)
                 pass
 
 # ----------------------------------------------------------------------
-# Build inline keyboard for problem (Status toggle + Ruglee + Comment + Delete)
+# Inline keyboard
 # ----------------------------------------------------------------------
 def build_problem_keyboard(problem_id: int) -> InlineKeyboardMarkup:
-    # Initially status is "قيد الانتظار", so the button to change to "قيد التصليح" is shown
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("🔧 قيد التصليح", callback_data=f"val_{problem_id}"),
@@ -325,12 +307,12 @@ def build_problem_keyboard(problem_id: int) -> InlineKeyboardMarkup:
     ])
 
 # ----------------------------------------------------------------------
-# Comment sessions (any user)
+# Comment sessions
 # ----------------------------------------------------------------------
 comment_sessions = {}
 
 # ----------------------------------------------------------------------
-# Bot command & message handlers (Arabic)
+# Handlers (Arabic)
 # ----------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -363,14 +345,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text
 
-    # Comment session?
     if user_id in comment_sessions:
         problem_id = comment_sessions.pop(user_id)
         set_problem_comment(problem_id, text)
         await update.message.reply_text("✅ تم حفظ التعليق بنجاح.")
         return
 
-    # Driver state machine
     driver = get_driver(user_id)
     state = driver["state"] if driver else "name_entry"
 
@@ -391,7 +371,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Problem report
     if driver and driver["name"] and driver["vehicle"]:
         problem_id = add_problem(user_id, driver["name"], driver["vehicle"], text, "")
         report_text = f"السائق: {driver['name']}\nالمركبة: {driver['vehicle']}\nالمشكلة: {text}"
@@ -414,11 +393,9 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     problem_text = caption if caption else "(مرفق وسائط)"
     header = f"السائق: {driver['name']}\nالمركبة: {driver['vehicle']}\nالمشكلة: {problem_text}"
 
-    media_type = ""
     if update.message.photo:
         file_id = update.message.photo[-1].file_id
-        media_type = "صورة"
-        problem_id = add_problem(user_id, driver["name"], driver["vehicle"], problem_text, media_type)
+        problem_id = add_problem(user_id, driver["name"], driver["vehicle"], problem_text, "صورة")
         await context.bot.send_photo(
             chat_id=ADMIN_GROUP_ID,
             photo=file_id,
@@ -427,8 +404,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     elif update.message.video:
         file_id = update.message.video.file_id
-        media_type = "فيديو"
-        problem_id = add_problem(user_id, driver["name"], driver["vehicle"], problem_text, media_type)
+        problem_id = add_problem(user_id, driver["name"], driver["vehicle"], problem_text, "فيديو")
         await context.bot.send_video(
             chat_id=ADMIN_GROUP_ID,
             video=file_id,
@@ -437,8 +413,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     elif update.message.voice:
         file_id = update.message.voice.file_id
-        media_type = "صوت"
-        problem_id = add_problem(user_id, driver["name"], driver["vehicle"], problem_text, media_type)
+        problem_id = add_problem(user_id, driver["name"], driver["vehicle"], problem_text, "صوت")
         await context.bot.send_voice(
             chat_id=ADMIN_GROUP_ID,
             voice=file_id,
@@ -471,10 +446,8 @@ async def handle_album_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_vehicle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    data = query.data
-    vehicle = data.split("_", 1)[1]
+    vehicle = query.data.split("_", 1)[1]
     user_id = query.from_user.id
-
     if vehicle == "OTHER":
         set_driver(user_id, state="custom_vehicle_entry")
         await query.edit_message_text("الرجاء إدخال رمز المركبة يدوياً (مثال: T01، LOGAN):")
@@ -486,7 +459,7 @@ async def handle_vehicle_callback(update: Update, context: ContextTypes.DEFAULT_
         )
 
 # ----------------------------------------------------------------------
-# Status toggle (Valider) – now toggles between "قيد الانتظار" and "قيد التصليح"
+# Status toggle
 # ----------------------------------------------------------------------
 async def toggle_valide(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -497,7 +470,6 @@ async def toggle_valide(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("المشكلة غير موجودة.")
         return
 
-    # Toggle
     if problem["status"] == "قيد الانتظار":
         new_status = "قيد التصليح"
         new_button_text = "⏳ قيد الانتظار"
@@ -507,7 +479,6 @@ async def toggle_valide(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     update_problem_status(problem_id, status=new_status)
 
-    # Rebuild keyboard with the updated status button and the other fixed buttons
     rug_text = "🔧 تم الإصلاح" if problem["ruglee"] == "غير مُصلح" else "🔄 لم يتم الإصلاح"
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(new_button_text, callback_data=f"val_{problem_id}"),
@@ -520,9 +491,6 @@ async def toggle_valide(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error(f"Edit markup error: {e}")
 
-# ----------------------------------------------------------------------
-# Ruglee toggle (unchanged, still "تم الإصلاح" / "غير مُصلح")
-# ----------------------------------------------------------------------
 async def toggle_ruglee(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -536,12 +504,7 @@ async def toggle_ruglee(update: Update, context: ContextTypes.DEFAULT_TYPE):
     update_problem_status(problem_id, ruglee=new_ruglee)
 
     rug_text = "🔧 تم الإصلاح" if new_ruglee == "غير مُصلح" else "🔄 لم يتم الإصلاح"
-    # Determine current status button text
-    if problem["status"] == "قيد الانتظار":
-        val_text = "🔧 قيد التصليح"
-    else:
-        val_text = "⏳ قيد الانتظار"
-
+    val_text = "🔧 قيد التصليح" if problem["status"] == "قيد الانتظار" else "⏳ قيد الانتظار"
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(val_text, callback_data=f"val_{problem_id}"),
          InlineKeyboardButton(rug_text, callback_data=f"rug_{problem_id}")],
@@ -553,9 +516,6 @@ async def toggle_ruglee(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error(f"Edit markup error: {e}")
 
-# ----------------------------------------------------------------------
-# Comment – everyone
-# ----------------------------------------------------------------------
 async def comment_problem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -564,7 +524,6 @@ async def comment_problem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not problem:
         await query.answer("المشكلة غير موجودة.")
         return
-
     user_id = update.effective_user.id
     comment_sessions[user_id] = problem_id
     await context.bot.send_message(
@@ -573,9 +532,6 @@ async def comment_problem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await query.answer("تم تفعيل وضع التعليق. أرسل التعليق في المحادثة الخاصة.", show_alert=True)
 
-# ----------------------------------------------------------------------
-# Delete – admin only
-# ----------------------------------------------------------------------
 async def delete_problem_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -587,7 +543,6 @@ async def delete_problem_handler(update: Update, context: ContextTypes.DEFAULT_T
     if not problem:
         await query.edit_message_text("المشكلة غير موجودة.")
         return
-
     delete_problem(problem_id)
     original_text = query.message.text or query.message.caption or ""
     new_text = f"🗑️ تم حذف المشكلة\n( {original_text} )"
@@ -611,7 +566,7 @@ async def export_excel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ----------------------------------------------------------------------
-# Scheduled job: send Excel every Saturday at 7:30 AM
+# Scheduled Excel every Saturday at 7:30 AM
 # ----------------------------------------------------------------------
 async def scheduled_excel(context: ContextTypes.DEFAULT_TYPE):
     await send_excel_to_group(context)
@@ -619,19 +574,16 @@ async def scheduled_excel(context: ContextTypes.DEFAULT_TYPE):
 def schedule_excel_job(app: Application):
     now = datetime.now()
     target_time = time(7, 30, 0)
-    # Find next Saturday (weekday 5, Monday=0)
-    days_ahead = 5 - now.weekday()  # 5 = Saturday
+    days_ahead = 5 - now.weekday()  # Saturday = 5 (Monday=0)
     if days_ahead < 0:
         days_ahead += 7
     next_saturday = now + timedelta(days=days_ahead)
     next_run = datetime.combine(next_saturday.date(), target_time)
     if now >= next_run:
-        # If today is Saturday and already past 7:30, move to next week
         next_run += timedelta(days=7)
-
     app.job_queue.run_repeating(
         scheduled_excel,
-        interval=7 * 24 * 60 * 60,  # 7 days
+        interval=7 * 24 * 60 * 60,
         first=next_run
     )
 
@@ -661,14 +613,12 @@ def main():
         logging.critical(f"Failed to build Application: {e}")
         sys.exit(1)
 
-    # Command handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("changename", change_name))
     app.add_handler(CommandHandler("changevehicle", change_vehicle))
     app.add_handler(CommandHandler("myinfo", my_info))
     app.add_handler(CommandHandler("export", export_excel))
 
-    # Message handlers
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(
         (filters.PHOTO | filters.VIDEO | filters.VOICE) & ~filters.CAPTION & ~filters.COMMAND,
@@ -680,7 +630,6 @@ def main():
         block=False
     ))
 
-    # Callback handlers
     app.add_handler(CallbackQueryHandler(handle_vehicle_callback, pattern="^veh_"))
     app.add_handler(CallbackQueryHandler(toggle_valide, pattern="^val_"))
     app.add_handler(CallbackQueryHandler(toggle_ruglee, pattern="^rug_"))
@@ -688,7 +637,6 @@ def main():
     app.add_handler(CallbackQueryHandler(delete_problem_handler, pattern="^del_"))
     app.add_error_handler(error_handler)
 
-    # Schedule weekly Excel
     schedule_excel_job(app)
 
     logging.info("Bot polling started...")
