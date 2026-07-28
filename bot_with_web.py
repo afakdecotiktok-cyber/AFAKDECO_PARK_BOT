@@ -46,7 +46,7 @@ try:
 except ValueError:
     sys.exit("FATAL: ADMIN_GROUP_ID must be an integer (e.g. -1004417485510).")
 
-# Parse admin IDs (now only used for Delete)
+# Parse admin IDs (only used for Delete)
 ADMIN_IDS = set()
 if ADMIN_IDS_STR:
     for uid in ADMIN_IDS_STR.split(","):
@@ -80,13 +80,12 @@ def init_db():
                     problem_text TEXT,
                     media_type TEXT,
                     date TEXT,
-                    status TEXT DEFAULT 'غير صحيح',
+                    status TEXT DEFAULT 'قيد الانتظار',
                     ruglee TEXT DEFAULT 'غير مُصلح')''')
-    # Add comments column if it doesn't exist
     try:
         c.execute("ALTER TABLE problems ADD COLUMN comments TEXT DEFAULT ''")
     except sqlite3.OperationalError:
-        pass  # column already exists
+        pass
     conn.commit()
     conn.close()
 
@@ -213,7 +212,7 @@ def vehicle_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 # ----------------------------------------------------------------------
-# Excel generation with Arabic columns (including comments)
+# Excel generation with Arabic columns
 # ----------------------------------------------------------------------
 def generate_excel() -> BytesIO:
     problems = get_all_problems()
@@ -264,7 +263,7 @@ async def send_excel_to_group(context: ContextTypes.DEFAULT_TYPE):
         logging.error(f"Failed to send Excel: {e}")
 
 # ----------------------------------------------------------------------
-# Media group handling (albums) – supports photo/video only
+# Media group handling (albums) – photo/video only
 # ----------------------------------------------------------------------
 media_groups = {}
 
@@ -312,12 +311,13 @@ async def forward_media_group(context: ContextTypes.DEFAULT_TYPE, group_id: str)
                 pass
 
 # ----------------------------------------------------------------------
-# Build inline keyboard for problem (Valide + Ruglee + Comment + Delete)
+# Build inline keyboard for problem (Status toggle + Ruglee + Comment + Delete)
 # ----------------------------------------------------------------------
 def build_problem_keyboard(problem_id: int) -> InlineKeyboardMarkup:
+    # Initially status is "قيد الانتظار", so the button to change to "قيد التصليح" is shown
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("✅ صحيح", callback_data=f"val_{problem_id}"),
+            InlineKeyboardButton("🔧 قيد التصليح", callback_data=f"val_{problem_id}"),
             InlineKeyboardButton("🔧 تم الإصلاح", callback_data=f"rug_{problem_id}")
         ],
         [InlineKeyboardButton("💬 تعليق", callback_data=f"com_{problem_id}")],
@@ -325,9 +325,9 @@ def build_problem_keyboard(problem_id: int) -> InlineKeyboardMarkup:
     ])
 
 # ----------------------------------------------------------------------
-# Comment sessions (any user can comment)
+# Comment sessions (any user)
 # ----------------------------------------------------------------------
-comment_sessions = {}  # user_id -> problem_id
+comment_sessions = {}
 
 # ----------------------------------------------------------------------
 # Bot command & message handlers (Arabic)
@@ -363,14 +363,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text
 
-    # ---------- Comment session (any user) ----------
+    # Comment session?
     if user_id in comment_sessions:
         problem_id = comment_sessions.pop(user_id)
         set_problem_comment(problem_id, text)
         await update.message.reply_text("✅ تم حفظ التعليق بنجاح.")
         return
 
-    # ---------- Driver state machine ----------
+    # Driver state machine
     driver = get_driver(user_id)
     state = driver["state"] if driver else "name_entry"
 
@@ -471,7 +471,7 @@ async def handle_album_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_vehicle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    data = query.data  # "veh_XXX" or "veh_OTHER"
+    data = query.data
     vehicle = data.split("_", 1)[1]
     user_id = query.from_user.id
 
@@ -486,7 +486,7 @@ async def handle_vehicle_callback(update: Update, context: ContextTypes.DEFAULT_
         )
 
 # ----------------------------------------------------------------------
-# Valider / Ruglee – NOW OPEN TO ALL GROUP MEMBERS (no admin check)
+# Status toggle (Valider) – now toggles between "قيد الانتظار" and "قيد التصليح"
 # ----------------------------------------------------------------------
 async def toggle_valide(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -497,13 +497,20 @@ async def toggle_valide(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("المشكلة غير موجودة.")
         return
 
-    new_status = "صحيح" if problem["status"] == "غير صحيح" else "غير صحيح"
+    # Toggle
+    if problem["status"] == "قيد الانتظار":
+        new_status = "قيد التصليح"
+        new_button_text = "⏳ قيد الانتظار"
+    else:
+        new_status = "قيد الانتظار"
+        new_button_text = "🔧 قيد التصليح"
+
     update_problem_status(problem_id, status=new_status)
 
-    val_text = "✅ صحيح" if new_status == "غير صحيح" else "❌ غير صحيح"
+    # Rebuild keyboard with the updated status button and the other fixed buttons
     rug_text = "🔧 تم الإصلاح" if problem["ruglee"] == "غير مُصلح" else "🔄 لم يتم الإصلاح"
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(val_text, callback_data=f"val_{problem_id}"),
+        [InlineKeyboardButton(new_button_text, callback_data=f"val_{problem_id}"),
          InlineKeyboardButton(rug_text, callback_data=f"rug_{problem_id}")],
         [InlineKeyboardButton("💬 تعليق", callback_data=f"com_{problem_id}")],
         [InlineKeyboardButton("🗑️ حذف المشكلة", callback_data=f"del_{problem_id}")]
@@ -513,6 +520,9 @@ async def toggle_valide(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error(f"Edit markup error: {e}")
 
+# ----------------------------------------------------------------------
+# Ruglee toggle (unchanged, still "تم الإصلاح" / "غير مُصلح")
+# ----------------------------------------------------------------------
 async def toggle_ruglee(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -526,7 +536,12 @@ async def toggle_ruglee(update: Update, context: ContextTypes.DEFAULT_TYPE):
     update_problem_status(problem_id, ruglee=new_ruglee)
 
     rug_text = "🔧 تم الإصلاح" if new_ruglee == "غير مُصلح" else "🔄 لم يتم الإصلاح"
-    val_text = "✅ صحيح" if problem["status"] == "غير صحيح" else "❌ غير صحيح"
+    # Determine current status button text
+    if problem["status"] == "قيد الانتظار":
+        val_text = "🔧 قيد التصليح"
+    else:
+        val_text = "⏳ قيد الانتظار"
+
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(val_text, callback_data=f"val_{problem_id}"),
          InlineKeyboardButton(rug_text, callback_data=f"rug_{problem_id}")],
@@ -539,7 +554,7 @@ async def toggle_ruglee(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.error(f"Edit markup error: {e}")
 
 # ----------------------------------------------------------------------
-# Comment – open to ALL group users
+# Comment – everyone
 # ----------------------------------------------------------------------
 async def comment_problem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -559,7 +574,7 @@ async def comment_problem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer("تم تفعيل وضع التعليق. أرسل التعليق في المحادثة الخاصة.", show_alert=True)
 
 # ----------------------------------------------------------------------
-# Delete – admin-only
+# Delete – admin only
 # ----------------------------------------------------------------------
 async def delete_problem_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -585,7 +600,7 @@ async def delete_problem_handler(update: Update, context: ContextTypes.DEFAULT_T
         logging.error(f"Could not edit message after delete: {e}")
 
 # ----------------------------------------------------------------------
-# /export command (manual Excel retrieval) – available to anyone in the group
+# /export command
 # ----------------------------------------------------------------------
 async def export_excel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     excel_file = generate_excel()
@@ -596,7 +611,7 @@ async def export_excel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ----------------------------------------------------------------------
-# Scheduled job: send Excel every 3 days at 7:30 AM
+# Scheduled job: send Excel every Saturday at 7:30 AM
 # ----------------------------------------------------------------------
 async def scheduled_excel(context: ContextTypes.DEFAULT_TYPE):
     await send_excel_to_group(context)
@@ -604,12 +619,19 @@ async def scheduled_excel(context: ContextTypes.DEFAULT_TYPE):
 def schedule_excel_job(app: Application):
     now = datetime.now()
     target_time = time(7, 30, 0)
-    next_run = datetime.combine(now.date(), target_time)
+    # Find next Saturday (weekday 5, Monday=0)
+    days_ahead = 5 - now.weekday()  # 5 = Saturday
+    if days_ahead < 0:
+        days_ahead += 7
+    next_saturday = now + timedelta(days=days_ahead)
+    next_run = datetime.combine(next_saturday.date(), target_time)
     if now >= next_run:
-        next_run += timedelta(days=1)
+        # If today is Saturday and already past 7:30, move to next week
+        next_run += timedelta(days=7)
+
     app.job_queue.run_repeating(
         scheduled_excel,
-        interval=3 * 24 * 60 * 60,  # 3 days
+        interval=7 * 24 * 60 * 60,  # 7 days
         first=next_run
     )
 
@@ -666,7 +688,7 @@ def main():
     app.add_handler(CallbackQueryHandler(delete_problem_handler, pattern="^del_"))
     app.add_error_handler(error_handler)
 
-    # Schedule Excel every 3 days at 7:30 AM
+    # Schedule weekly Excel
     schedule_excel_job(app)
 
     logging.info("Bot polling started...")
