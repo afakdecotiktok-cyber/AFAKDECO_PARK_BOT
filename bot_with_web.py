@@ -73,6 +73,7 @@ def init_db():
             code TEXT PRIMARY KEY
         )
     ''')
+    # Insert default vehicles if empty
     cur.execute("SELECT COUNT(*) FROM vehicles")
     if cur.fetchone()[0] == 0:
         default_vehicles = ["F01","F02","H01"] + [f"M{i:02d}" for i in range(1,32)] + ["LOGAN"]
@@ -93,6 +94,15 @@ def init_db():
             validation_requester BIGINT DEFAULT 0
         )
     ''')
+    # Ensure the validation_requester column exists (for tables created before this update)
+    try:
+        cur.execute("ALTER TABLE problems ADD COLUMN validation_requester BIGINT DEFAULT 0")
+        conn.commit()
+    except psycopg2.errors.DuplicateColumn:
+        conn.rollback()
+    except Exception:
+        conn.rollback()
+
     cur.execute('''
         CREATE TABLE IF NOT EXISTS km_readings (
             id SERIAL PRIMARY KEY,
@@ -107,6 +117,7 @@ def init_db():
             last_vidange_km INTEGER DEFAULT 0
         )
     ''')
+    # Insert vidange entries for any existing vehicle missing them
     cur.execute("SELECT code FROM vehicles")
     vehicles = [r[0] for r in cur.fetchall()]
     for v in vehicles:
@@ -614,6 +625,7 @@ async def validation_request_callback(update: Update, context: ContextTypes.DEFA
     if not problem:
         await query.answer("غير موجود.")
         return
+    # Now the column exists, this will work
     update_problem_status(problem_id, validation_requester=query.from_user.id)
     driver = get_driver(query.from_user.id)
     driver_name = driver["name"] if driver else "Unknown"
@@ -686,6 +698,29 @@ async def remove_vehicle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
     remove_vehicle(code.upper())
     await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_VEHICLE_MGMT, text=f"🗑️ تم حذف المركبة {code.upper()}.")
 
+async def set_vidange_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command: /setvidange <vehicle_code> <km>"""
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text("استخدم: /setvidange CODE KM")
+        return
+    code = context.args[0].upper()
+    try:
+        km = int(context.args[1])
+    except ValueError:
+        await update.message.reply_text("يجب أن يكون الكيلومتر رقماً.")
+        return
+    # Check vehicle exists
+    vehicles = get_all_vehicles()
+    if code not in vehicles:
+        await update.message.reply_text(f"المركبة {code} غير موجودة في القائمة.")
+        return
+    set_last_vidange_km(code, km)
+    await update.message.reply_text(f"✅ تم تعيين آخر فيدانج للمركبة {code} إلى {km} كم.")
+    await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_VEHICLE_MGMT,
+                                   text=f"⚙️ تم تعيين آخر فيدانج للمركبة {code} = {km} كم.")
+
 # ----------------------------------------------------------------------
 # Export commands
 # ----------------------------------------------------------------------
@@ -719,12 +754,10 @@ async def weekly_excel(context: ContextTypes.DEFAULT_TYPE):
 def schedule_jobs(app: Application):
     now = datetime.now()
     t = time(7, 30, 0)
-    # Daily dashboard at 7:30
     next_daily = datetime.combine(now.date(), t)
     if now >= next_daily:
         next_daily += timedelta(days=1)
     app.job_queue.run_repeating(send_dashboard, interval=24*60*60, first=next_daily)
-    # Weekly Excel on Saturday at 7:30
     days_until_sat = (5 - now.weekday()) % 7
     next_sat = datetime.combine(now.date() + timedelta(days=days_until_sat), t)
     if now >= next_sat:
@@ -759,21 +792,17 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Command handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("addvehicle", add_vehicle_cmd))
     app.add_handler(CommandHandler("removevehicle", remove_vehicle_cmd))
+    app.add_handler(CommandHandler("setvidange", set_vidange_cmd))
     app.add_handler(CommandHandler("export", export_problems))
     app.add_handler(CommandHandler("export_vidange", export_vidange))
 
-    # Text handlers
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_km_input), group=1)
-
-    # Media handler
     app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.VOICE, handle_media))
 
-    # Callback handlers
     app.add_handler(CallbackQueryHandler(vehicle_selection_callback, pattern="^selv_"))
     app.add_handler(CallbackQueryHandler(valide_callback, pattern="^val_"))
     app.add_handler(CallbackQueryHandler(ruglee_callback, pattern="^rug_"))
