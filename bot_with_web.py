@@ -1,18 +1,17 @@
 import os, sys, logging, threading, asyncio
 from datetime import datetime, time, timedelta
 from io import BytesIO
-from collections import defaultdict
 
 import psycopg2, psycopg2.extras
 from flask import Flask
 from openpyxl import Workbook
 from openpyxl.styles import Font
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 # ----------------------------------------------------------------------
-# Flask app
+# Flask app – runs in a daemon thread so the main thread can run the bot
 # ----------------------------------------------------------------------
 web_app = Flask(__name__)
 
@@ -21,7 +20,7 @@ def home():
     return "Bot is running."
 
 # ----------------------------------------------------------------------
-# Environment variables
+# Configuration – environment variables on Render
 # ----------------------------------------------------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_GROUP_ID_STR = os.environ.get("ADMIN_GROUP_ID")
@@ -362,13 +361,12 @@ def status_emoji(vehicle: str) -> str:
     return "🟢"
 
 # ----------------------------------------------------------------------
-# Handlers
+# Handler functions
 # ----------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     driver = get_driver(user_id)
     if driver and driver["name"] and driver["vehicle"]:
-        # Force state to idle if already fully registered
         if driver["state"] != "idle":
             set_driver(user_id, state="idle")
         await update.message.reply_text(
@@ -414,7 +412,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if state == "vehicle_selection":
-        # Show the vehicle list again
         vehicles = get_all_vehicles()
         await update.message.reply_text("الرجاء اختيار المركبة من القائمة:", reply_markup=vehicle_inline_keyboard(vehicles, "selv_"))
         return
@@ -480,9 +477,55 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # fallback
     await update.message.reply_text("استخدم الأزرار أدناه.", reply_markup=DRIVER_KEYBOARD)
 
-# ----------------------------------------------------------------------
-# Callback handlers
-# ----------------------------------------------------------------------
+async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    driver = get_driver(user_id)
+    if not driver or not driver["name"] or not driver["vehicle"]:
+        await update.message.reply_text("ملفك غير مكتمل. الرجاء استخدام /start أولاً.")
+        return
+
+    caption = update.message.caption or ""
+    problem_text = caption if caption else "(مرفق وسائط)"
+    header = f"السائق: {driver['name']}\nالمركبة: {driver['vehicle']}\nالمشكلة: {problem_text}"
+
+    if update.message.photo:
+        file_id = update.message.photo[-1].file_id
+        media_type = "صورة"
+        problem_id = add_problem(user_id, driver["name"], driver["vehicle"], problem_text, media_type)
+        await context.bot.send_photo(
+            chat_id=ADMIN_GROUP_ID,
+            message_thread_id=TOPIC_RECLAMATIONS,
+            photo=file_id,
+            caption=header,
+            reply_markup=build_problem_keyboard(problem_id)
+        )
+    elif update.message.video:
+        file_id = update.message.video.file_id
+        media_type = "فيديو"
+        problem_id = add_problem(user_id, driver["name"], driver["vehicle"], problem_text, media_type)
+        await context.bot.send_video(
+            chat_id=ADMIN_GROUP_ID,
+            message_thread_id=TOPIC_RECLAMATIONS,
+            video=file_id,
+            caption=header,
+            reply_markup=build_problem_keyboard(problem_id)
+        )
+    elif update.message.voice:
+        file_id = update.message.voice.file_id
+        media_type = "صوت"
+        problem_id = add_problem(user_id, driver["name"], driver["vehicle"], problem_text, media_type)
+        await context.bot.send_voice(
+            chat_id=ADMIN_GROUP_ID,
+            message_thread_id=TOPIC_RECLAMATIONS,
+            voice=file_id,
+            caption=header,
+            reply_markup=build_problem_keyboard(problem_id)
+        )
+    else:
+        return
+
+    await update.message.reply_text("تم إرسال الشكوى.", reply_markup=DRIVER_KEYBOARD)
+
 async def vehicle_selection_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -490,7 +533,6 @@ async def vehicle_selection_callback(update: Update, context: ContextTypes.DEFAU
     user_id = query.from_user.id
     set_driver(user_id, vehicle=vehicle, state="idle")
     await query.edit_message_text(f"تم تعيين المركبة إلى {vehicle}.")
-    # Send the main driver keyboard as a new message
     await context.bot.send_message(chat_id=user_id, text="يمكنك الآن استخدام الأزرار أدناه:", reply_markup=DRIVER_KEYBOARD)
 
 async def valide_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -542,7 +584,6 @@ async def ruglee_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if req_id and req_id != 0:
             try:
                 await context.bot.send_message(chat_id=req_id, text=f"تم تأكيد إصلاح الفيدانج للمركبة {problem['vehicle']}. الرجاء إدخال الكيلومترات الحالية:")
-                # Mark that the user needs to send km
                 context.application.bot_data.setdefault("km_await", {})[req_id] = problem["vehicle"]
             except Exception as e:
                 logging.error(f"Failed to ask km: {e}")
@@ -585,7 +626,6 @@ async def validation_request_callback(update: Update, context: ContextTypes.DEFA
     await query.edit_message_text("تم إرسال طلب التحقق.")
 
 async def handle_km_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles km entry when the user was asked after vidange repair."""
     user_id = update.effective_user.id
     text = update.message.text.strip()
     if not text.isdigit():
@@ -658,10 +698,12 @@ async def export_vidange(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_document(document=file, filename="الفيدانج.xlsx")
 
 # ----------------------------------------------------------------------
-# Dashboard (daily)
+# Dashboard and weekly Excel jobs
 # ----------------------------------------------------------------------
 async def send_dashboard(context: ContextTypes.DEFAULT_TYPE):
     vehicles = get_all_vehicles()
+    if not vehicles:
+        return
     buttons = [InlineKeyboardButton(f"{status_emoji(v)} {v}", callback_data=f"hist_{v}") for v in vehicles]
     markup = InlineKeyboardMarkup([buttons[i:i+4] for i in range(0, len(buttons), 4)])
     await context.bot.send_message(
@@ -677,12 +719,12 @@ async def weekly_excel(context: ContextTypes.DEFAULT_TYPE):
 def schedule_jobs(app: Application):
     now = datetime.now()
     t = time(7, 30, 0)
-    # Daily dashboard
+    # Daily dashboard at 7:30
     next_daily = datetime.combine(now.date(), t)
     if now >= next_daily:
         next_daily += timedelta(days=1)
     app.job_queue.run_repeating(send_dashboard, interval=24*60*60, first=next_daily)
-    # Weekly Excel (Saturday)
+    # Weekly Excel on Saturday at 7:30
     days_until_sat = (5 - now.weekday()) % 7
     next_sat = datetime.combine(now.date() + timedelta(days=days_until_sat), t)
     if now >= next_sat:
@@ -717,16 +759,21 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
+    # Command handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("addvehicle", add_vehicle_cmd))
     app.add_handler(CommandHandler("removevehicle", remove_vehicle_cmd))
     app.add_handler(CommandHandler("export", export_problems))
     app.add_handler(CommandHandler("export_vidange", export_vidange))
 
+    # Text handlers
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_km_input), group=1)
+
+    # Media handler
     app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.VOICE, handle_media))
 
+    # Callback handlers
     app.add_handler(CallbackQueryHandler(vehicle_selection_callback, pattern="^selv_"))
     app.add_handler(CallbackQueryHandler(valide_callback, pattern="^val_"))
     app.add_handler(CallbackQueryHandler(ruglee_callback, pattern="^rug_"))
