@@ -12,7 +12,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMe
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 # ----------------------------------------------------------------------
-# Flask app – runs in a daemon thread so the main thread can run the bot
+# Flask app
 # ----------------------------------------------------------------------
 web_app = Flask(__name__)
 
@@ -21,14 +21,13 @@ def home():
     return "Bot is running."
 
 # ----------------------------------------------------------------------
-# Configuration – environment variables on Render
+# Environment variables
 # ----------------------------------------------------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_GROUP_ID_STR = os.environ.get("ADMIN_GROUP_ID")
 ADMIN_IDS_STR = os.environ.get("ADMIN_IDS", "")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-# Topic IDs
 TOPIC_RECLAMATIONS = int(os.environ.get("TOPIC_RECLAMATIONS", "0"))
 TOPIC_VALIDATION = int(os.environ.get("TOPIC_VALIDATION", "0"))
 TOPIC_VIDANGE = int(os.environ.get("TOPIC_VIDANGE", "0"))
@@ -75,7 +74,6 @@ def init_db():
             code TEXT PRIMARY KEY
         )
     ''')
-    # Insert default vehicles if table is empty
     cur.execute("SELECT COUNT(*) FROM vehicles")
     if cur.fetchone()[0] == 0:
         default_vehicles = ["F01","F02","H01"] + [f"M{i:02d}" for i in range(1,32)] + ["LOGAN"]
@@ -110,7 +108,6 @@ def init_db():
             last_vidange_km INTEGER DEFAULT 0
         )
     ''')
-    # Insert default vidange entries for each existing vehicle if missing
     cur.execute("SELECT code FROM vehicles")
     vehicles = [r[0] for r in cur.fetchall()]
     for v in vehicles:
@@ -162,7 +159,6 @@ def add_vehicle(code: str):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("INSERT INTO vehicles (code) VALUES (%s) ON CONFLICT DO NOTHING", (code,))
-    # ensure vidange entry exists
     cur.execute("INSERT INTO vehicle_vidange (vehicle, last_vidange_km) VALUES (%s, 0) ON CONFLICT DO NOTHING", (code,))
     conn.commit()
     cur.close()
@@ -249,7 +245,6 @@ def get_driver_problems(user_id: int, status_filter: str = None) -> list:
     conn.close()
     return [dict(r) for r in rows]
 
-# km / vidange helpers
 def add_km_reading(vehicle: str, km: int):
     conn = get_conn()
     cur = conn.cursor()
@@ -286,22 +281,18 @@ def has_active_vidange(vehicle: str) -> bool:
     return row is not None
 
 def get_vehicle_status(vehicle: str) -> str:
-    """Return 'good', 'en_cours', 'bad'."""
     conn = get_conn()
     cur = conn.cursor()
-    # any problem with status 'قيد الانتظار' (bad)
     cur.execute("SELECT COUNT(*) FROM problems WHERE vehicle=%s AND status='قيد الانتظار'", (vehicle,))
     if cur.fetchone()[0] > 0:
         return 'bad'
-    # any problem with status 'قيد التصليح'
     cur.execute("SELECT COUNT(*) FROM problems WHERE vehicle=%s AND status='قيد التصليح'", (vehicle,))
     if cur.fetchone()[0] > 0:
         return 'en_cours'
-    # also check vidange warning? already covered by vidange problem creation
     return 'good'
 
 # ----------------------------------------------------------------------
-# Excel generation (problems)
+# Excel generation
 # ----------------------------------------------------------------------
 def generate_problems_excel() -> BytesIO:
     problems = get_all_problems()
@@ -335,18 +326,15 @@ def generate_vidange_excel() -> BytesIO:
     for v in vehicles:
         ws = wb.create_sheet(title=v)
         ws.append(["التاريخ", "العداد الحالي (KM)", "آخر فيدانج (KM)"])
-        # fetch readings
         conn = get_conn()
         cur = conn.cursor()
         cur.execute("SELECT date, km FROM km_readings WHERE vehicle=%s ORDER BY date DESC", (v,))
         readings = cur.fetchall()
-        # get last vidange km
         last_km = get_last_vidange_km(v)
         for date_str, km in readings:
             ws.append([date_str, km, last_km])
         cur.close()
         conn.close()
-        # adjust widths
         for col in ws.columns:
             max_len = max((len(str(c.value)) for c in col if c.value), default=0)
             ws.column_dimensions[col[0].column_letter].width = min(max_len+2, 50)
@@ -356,14 +344,14 @@ def generate_vidange_excel() -> BytesIO:
     return out
 
 # ----------------------------------------------------------------------
-# Keyboard helpers
+# Keyboards
 # ----------------------------------------------------------------------
 DRIVER_KEYBOARD = ReplyKeyboardMarkup([
     [KeyboardButton("📝 تقديم شكوى"), KeyboardButton("✅ طلب التحقق من الإصلاح")],
     [KeyboardButton("🚗 إدخال عدد الكيلومترات")]
 ], resize_keyboard=True)
 
-def vehicle_inline_keyboard(vehicles: list, prefix="vh_") -> InlineKeyboardMarkup:
+def vehicle_inline_keyboard(vehicles: list, prefix="selv_") -> InlineKeyboardMarkup:
     buttons = [InlineKeyboardButton(v, callback_data=f"{prefix}{v}") for v in vehicles]
     return InlineKeyboardMarkup([buttons[i:i+4] for i in range(0, len(buttons), 4)])
 
@@ -380,6 +368,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     driver = get_driver(user_id)
     if driver and driver["name"] and driver["vehicle"]:
+        # Force state to idle if already fully registered
+        if driver["state"] != "idle":
+            set_driver(user_id, state="idle")
         await update.message.reply_text(
             f"أهلاً بعودتك، {driver['name']}!\nمركبتك: {driver['vehicle']}",
             reply_markup=DRIVER_KEYBOARD
@@ -398,7 +389,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("awaiting_comment"):
         problem_id = context.user_data.pop("awaiting_comment")
         set_problem_comment(problem_id, text)
-        await update.message.reply_text("✅ تم حفظ التعليق بنجاح.")
+        await update.message.reply_text("✅ تم حفظ التعليق بنجاح.", reply_markup=DRIVER_KEYBOARD)
         return
 
     # ----- await km entry after vidange repair -----
@@ -421,8 +412,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         vehicles = get_all_vehicles()
         await update.message.reply_text("تم حفظ الاسم. اختر مركبتك:", reply_markup=vehicle_inline_keyboard(vehicles, "selv_"))
         return
+
     if state == "vehicle_selection":
-        await update.message.reply_text("الرجاء اختيار المركبة من القائمة.")
+        # Show the vehicle list again
+        vehicles = get_all_vehicles()
+        await update.message.reply_text("الرجاء اختيار المركبة من القائمة:", reply_markup=vehicle_inline_keyboard(vehicles, "selv_"))
         return
 
     # ----- Driver commands via keyboard buttons -----
@@ -434,9 +428,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "✅ طلب التحقق من الإصلاح":
         problems = get_driver_problems(user_id, status_filter="قيد التصليح")
         if not problems:
-            await update.message.reply_text("لا توجد مشاكل بحاجة للتحقق من إصلاحها.")
+            await update.message.reply_text("لا توجد مشاكل بحاجة للتحقق من إصلاحها.", reply_markup=DRIVER_KEYBOARD)
             return
-        # show list of problems
         buttons = [InlineKeyboardButton(f"مشكلة #{p['id']} - {p['problem_text'][:30]}...", callback_data=f"valreq_{p['id']}") for p in problems]
         await update.message.reply_text("اختر المشكلة التي تم إصلاحها:", reply_markup=InlineKeyboardMarkup([buttons[i:i+2] for i in range(0, len(buttons), 2)]))
         return
@@ -453,13 +446,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ----- actual reclamation or km entry -----
     if context.user_data.get("expecting_reclamation"):
         context.user_data.pop("expecting_reclamation")
-        # same as old logic, forward to topic
         if not driver or not driver["name"] or not driver["vehicle"]:
             await update.message.reply_text("ملفك غير مكتمل.")
             return
         problem_id = add_problem(user_id, driver["name"], driver["vehicle"], text, "")
         report = f"السائق: {driver['name']}\nالمركبة: {driver['vehicle']}\nالمشكلة: {text}"
         await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_RECLAMATIONS, text=report, reply_markup=build_problem_keyboard(problem_id))
+        await update.message.reply_text("تم إرسال الشكوى.", reply_markup=DRIVER_KEYBOARD)
         return
 
     if context.user_data.get("expecting_km"):
@@ -473,17 +466,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         km = int(text)
         vehicle = driver["vehicle"]
         add_km_reading(vehicle, km)
-        # check vidange
         last_km = get_last_vidange_km(vehicle)
         if last_km > 0 and km >= last_km + 9000 and not has_active_vidange(vehicle):
-            # create vidange reclamation
             vidange_problem_id = add_problem(0, "نظام", vehicle, f"Vidange {vehicle}", "نظام")
             await context.bot.send_message(
                 chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_VIDANGE,
                 text=f"⚠️ تنبيه فيدانج: المركبة {vehicle}\nالعداد الحالي: {km} كم\nآخر فيدانج: {last_km} كم",
                 reply_markup=build_problem_keyboard(vidange_problem_id)
             )
-        await update.message.reply_text(f"تم تسجيل العداد: {km} كم.")
+        await update.message.reply_text(f"تم تسجيل العداد: {km} كم.", reply_markup=DRIVER_KEYBOARD)
         return
 
     # fallback
@@ -498,7 +489,9 @@ async def vehicle_selection_callback(update: Update, context: ContextTypes.DEFAU
     vehicle = query.data.split("_", 1)[1]
     user_id = query.from_user.id
     set_driver(user_id, vehicle=vehicle, state="idle")
-    await query.edit_message_text(f"تم تعيين المركبة إلى {vehicle}.\nيمكنك الآن استخدام الأزرار أدناه:", reply_markup=DRIVER_KEYBOARD)
+    await query.edit_message_text(f"تم تعيين المركبة إلى {vehicle}.")
+    # Send the main driver keyboard as a new message
+    await context.bot.send_message(chat_id=user_id, text="يمكنك الآن استخدام الأزرار أدناه:", reply_markup=DRIVER_KEYBOARD)
 
 async def valide_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -544,19 +537,13 @@ async def ruglee_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("💬 تعليق", callback_data=f"com_{problem_id}")],
         [InlineKeyboardButton("🗑️ حذف", callback_data=f"del_{problem_id}")]
     ]))
-    # if vidange repaired, ask the requester for new km
     if problem["media_type"] == "نظام" and new_ruglee == "تم الإصلاح":
         req_id = problem.get("validation_requester") or problem.get("user_id")
         if req_id and req_id != 0:
             try:
                 await context.bot.send_message(chat_id=req_id, text=f"تم تأكيد إصلاح الفيدانج للمركبة {problem['vehicle']}. الرجاء إدخال الكيلومترات الحالية:")
-                # set state for that user
-                # Since we can't directly modify other user's context, we'll need to maintain a global dict.
-                # For simplicity, we store in a global dict `user_await_km` using the bot instance.
-                # We'll use bot_data.
-                if not context.application.bot_data.get("km_await"):
-                    context.application.bot_data["km_await"] = {}
-                context.application.bot_data["km_await"][req_id] = problem["vehicle"]
+                # Mark that the user needs to send km
+                context.application.bot_data.setdefault("km_await", {})[req_id] = problem["vehicle"]
             except Exception as e:
                 logging.error(f"Failed to ask km: {e}")
 
@@ -586,7 +573,6 @@ async def validation_request_callback(update: Update, context: ContextTypes.DEFA
     if not problem:
         await query.answer("غير موجود.")
         return
-    # Set the validation requester
     update_problem_status(problem_id, validation_requester=query.from_user.id)
     driver = get_driver(query.from_user.id)
     driver_name = driver["name"] if driver else "Unknown"
@@ -597,6 +583,45 @@ async def validation_request_callback(update: Update, context: ContextTypes.DEFA
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ تم الإصلاح", callback_data=f"rug_{problem_id}")]])
     )
     await query.edit_message_text("تم إرسال طلب التحقق.")
+
+async def handle_km_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles km entry when the user was asked after vidange repair."""
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    if not text.isdigit():
+        return
+    km = int(text)
+    await_data = context.application.bot_data.get("km_await", {})
+    vehicle = await_data.pop(user_id, None)
+    if vehicle:
+        add_km_reading(vehicle, km)
+        set_last_vidange_km(vehicle, km)
+        await update.message.reply_text(f"✅ تم تحديث الفيدانج: {km} كم.", reply_markup=DRIVER_KEYBOARD)
+
+async def vehicle_history_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    vehicle = query.data.split("_", 1)[1]
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("SELECT * FROM problems WHERE vehicle=%s ORDER BY date DESC", (vehicle,))
+    problems = [dict(r) for r in cur.fetchall()]
+    cur.execute("SELECT date, km FROM km_readings WHERE vehicle=%s ORDER BY date DESC LIMIT 5", (vehicle,))
+    readings = cur.fetchall()
+    cur.close()
+    conn.close()
+    text = f"🚘 تاريخ المركبة {vehicle}:\n"
+    if problems:
+        text += "\n📋 المشاكل:\n"
+        for p in problems:
+            text += f"  #{p['id']} | {p['date']} | {p['problem_text'][:40]} | {p['status']} | {p['ruglee']}\n"
+    else:
+        text += "لا توجد مشاكل مسجلة.\n"
+    if readings:
+        text += "\n🛢️ آخر قراءات العداد:\n"
+        for d, k in readings:
+            text += f"  {d} - {k} كم\n"
+    await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_HISTORY, text=text)
 
 # ----------------------------------------------------------------------
 # Admin commands
@@ -645,34 +670,27 @@ async def send_dashboard(context: ContextTypes.DEFAULT_TYPE):
         reply_markup=markup
     )
 
-async def vehicle_history_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    vehicle = query.data.split("_", 1)[1]
-    # fetch problems
-    conn = get_conn()
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT * FROM problems WHERE vehicle=%s ORDER BY date DESC", (vehicle,))
-    problems = [dict(r) for r in cur.fetchall()]
-    cur.execute("SELECT date, km FROM km_readings WHERE vehicle=%s ORDER BY date DESC LIMIT 5", (vehicle,))
-    readings = cur.fetchall()
-    cur.close()
-    conn.close()
-    text = f"🚘 تاريخ المركبة {vehicle}:\n"
-    if problems:
-        text += "\n📋 المشاكل:\n"
-        for p in problems:
-            text += f"  #{p['id']} | {p['date']} | {p['problem_text'][:40]} | {p['status']} | {p['ruglee']}\n"
-    else:
-        text += "لا توجد مشاكل مسجلة.\n"
-    if readings:
-        text += "\n🛢️ آخر قراءات العداد:\n"
-        for d, k in readings:
-            text += f"  {d} - {k} كم\n"
-    await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_HISTORY, text=text)
+async def weekly_excel(context: ContextTypes.DEFAULT_TYPE):
+    file = generate_problems_excel()
+    await context.bot.send_document(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_GENERAL, document=file, filename="المشاكل_الأسبوعي.xlsx")
+
+def schedule_jobs(app: Application):
+    now = datetime.now()
+    t = time(7, 30, 0)
+    # Daily dashboard
+    next_daily = datetime.combine(now.date(), t)
+    if now >= next_daily:
+        next_daily += timedelta(days=1)
+    app.job_queue.run_repeating(send_dashboard, interval=24*60*60, first=next_daily)
+    # Weekly Excel (Saturday)
+    days_until_sat = (5 - now.weekday()) % 7
+    next_sat = datetime.combine(now.date() + timedelta(days=days_until_sat), t)
+    if now >= next_sat:
+        next_sat += timedelta(days=7)
+    app.job_queue.run_repeating(weekly_excel, interval=7*24*60*60, first=next_sat)
 
 # ----------------------------------------------------------------------
-# Build problem keyboard (used for reclamations)
+# Problem keyboard builder
 # ----------------------------------------------------------------------
 def build_problem_keyboard(problem_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -683,85 +701,10 @@ def build_problem_keyboard(problem_id: int) -> InlineKeyboardMarkup:
     ])
 
 # ----------------------------------------------------------------------
-# Media handlers (simplified: forward to reclamation topic)
-# ----------------------------------------------------------------------
-async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    driver = get_driver(user_id)
-    if not driver or not driver["name"] or not driver["vehicle"]:
-        await update.message.reply_text("ملف غير مكتمل.")
-        return
-    caption = update.message.caption or ""
-    problem_text = caption if caption else "(مرفق وسائط)"
-    if update.message.photo:
-        file_id = update.message.photo[-1].file_id
-        media_type = "صورة"
-        problem_id = add_problem(user_id, driver["name"], driver["vehicle"], problem_text, media_type)
-        await context.bot.send_photo(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_RECLAMATIONS, photo=file_id,
-                                     caption=f"السائق: {driver['name']}\nالمركبة: {driver['vehicle']}\nالمشكلة: {problem_text}",
-                                     reply_markup=build_problem_keyboard(problem_id))
-    elif update.message.video:
-        file_id = update.message.video.file_id
-        media_type = "فيديو"
-        problem_id = add_problem(user_id, driver["name"], driver["vehicle"], problem_text, media_type)
-        await context.bot.send_video(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_RECLAMATIONS, video=file_id,
-                                     caption=f"السائق: {driver['name']}\nالمركبة: {driver['vehicle']}\nالمشكلة: {problem_text}",
-                                     reply_markup=build_problem_keyboard(problem_id))
-    elif update.message.voice:
-        file_id = update.message.voice.file_id
-        media_type = "صوت"
-        problem_id = add_problem(user_id, driver["name"], driver["vehicle"], problem_text, media_type)
-        await context.bot.send_voice(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_RECLAMATIONS, voice=file_id,
-                                     caption=f"السائق: {driver['name']}\nالمركبة: {driver['vehicle']}\nالمشكلة: {problem_text}",
-                                     reply_markup=build_problem_keyboard(problem_id))
-
-# ----------------------------------------------------------------------
 # Error handler
 # ----------------------------------------------------------------------
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logging.error(msg="Exception:", exc_info=context.error)
-
-# ----------------------------------------------------------------------
-# Schedule jobs
-# ----------------------------------------------------------------------
-async def weekly_excel(context: ContextTypes.DEFAULT_TYPE):
-    file = generate_problems_excel()
-    await context.bot.send_document(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_GENERAL, document=file, filename="المشاكل_الأسبوعي.xlsx")
-
-def schedule_jobs(app: Application):
-    now = datetime.now()
-    t = time(7, 30, 0)
-    # daily dashboard
-    next_daily = datetime.combine(now.date(), t)
-    if now >= next_daily:
-        next_daily += timedelta(days=1)
-    app.job_queue.run_repeating(send_dashboard, interval=24*60*60, first=next_daily)
-    # weekly excel (saturday)
-    days_until_sat = (5 - now.weekday()) % 7
-    next_sat = datetime.combine(now.date() + timedelta(days=days_until_sat), t)
-    if now >= next_sat:
-        next_sat += timedelta(days=7)
-    app.job_queue.run_repeating(weekly_excel, interval=7*24*60*60, first=next_sat)
-
-# ----------------------------------------------------------------------
-# Global km await dict (simplified) – use bot_data
-# ----------------------------------------------------------------------
-# Handled inside ruglee_callback using context.application.bot_data["km_await"] and a message handler checking that.
-
-# Add a generic message handler for km entry when bot_data["km_await"] has user_id.
-async def handle_km_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    text = update.message.text.strip()
-    if not text.isdigit():
-        return
-    km = int(text)
-    await_data = context.application.bot_data.get("km_await", {})
-    vehicle = await_data.pop(user_id, None)
-    if vehicle:
-        add_km_reading(vehicle, km)
-        set_last_vidange_km(vehicle, km)
-        await update.message.reply_text(f"✅ تم تحديث الفيدانج: {km} كم.")
-    # else just ignore
 
 # ----------------------------------------------------------------------
 # Main
@@ -774,21 +717,16 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("addvehicle", add_vehicle_cmd))
     app.add_handler(CommandHandler("removevehicle", remove_vehicle_cmd))
     app.add_handler(CommandHandler("export", export_problems))
     app.add_handler(CommandHandler("export_vidange", export_vidange))
 
-    # text messages
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    # km input handler (when awaiting after vidange repair)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_km_input), group=1)
-    # media
     app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.VOICE, handle_media))
 
-    # callbacks
     app.add_handler(CallbackQueryHandler(vehicle_selection_callback, pattern="^selv_"))
     app.add_handler(CallbackQueryHandler(valide_callback, pattern="^val_"))
     app.add_handler(CallbackQueryHandler(ruglee_callback, pattern="^rug_"))
