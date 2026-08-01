@@ -20,7 +20,7 @@ def home():
     return "Bot is running."
 
 # ----------------------------------------------------------------------
-# Configuration
+# Configuration – environment variables on Render
 # ----------------------------------------------------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_GROUP_ID_STR = os.environ.get("ADMIN_GROUP_ID")
@@ -366,24 +366,21 @@ def status_emoji(vehicle: str) -> str:
     return "🟢"
 
 # ----------------------------------------------------------------------
-# Universal send helpers (used by both commands and callbacks)
+# Helper to safely send dashboard
 # ----------------------------------------------------------------------
-async def _reply_or_send(update: Update, context: ContextTypes.DEFAULT_TYPE, **kwargs):
-    """Reply to the message that triggered the update (works for both Message and CallbackQuery)."""
-    if update.message:
-        await update.message.reply_document(**kwargs)
-    elif update.callback_query:
-        await context.bot.send_document(chat_id=update.callback_query.message.chat_id, **kwargs)
-    else:
-        pass
-
 async def _send_dashboard_to_group(context: ContextTypes.DEFAULT_TYPE):
     vehicles = get_all_vehicles()
     if not vehicles: return
     buttons = [InlineKeyboardButton(f"{status_emoji(v)} {v}", callback_data=f"hist_{v}") for v in vehicles]
     markup = InlineKeyboardMarkup([buttons[i:i+4] for i in range(0, len(buttons), 4)])
-    await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_GENERAL,
-        text="📊 الحالة الحالية للمركبات:\n🟢 جيدة | 🟠 قيد المعالجة | 🔴 سيئة", reply_markup=markup)
+    try:
+        await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_GENERAL,
+            text="📊 الحالة اليومية للمركبات:\n🟢 جيدة | 🟠 قيد المعالجة | 🔴 سيئة", reply_markup=markup)
+    except Exception as e:
+        # Fallback: send without thread (main general chat, works if bot is admin but topic missing)
+        logging.warning(f"Dashboard topic error: {e}. Falling back to no thread.")
+        await context.bot.send_message(chat_id=ADMIN_GROUP_ID,
+            text="📊 الحالة اليومية للمركبات:\n🟢 جيدة | 🟠 قيد المعالجة | 🔴 سيئة", reply_markup=markup)
 
 # ----------------------------------------------------------------------
 # Handlers
@@ -533,7 +530,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("تم إرسال الشكوى.", reply_markup=MAIN_KEYBOARD)
 
 # ----------------------------------------------------------------------
-# Callback handlers (Valider, Ruglee, Delete, Validation request, Settings, Admin panel)
+# Callback handlers
 # ----------------------------------------------------------------------
 async def vehicle_selection_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -703,7 +700,7 @@ async def settings_change_name(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.edit_message_text("أرسل اسمك الجديد:")
 
 # ----------------------------------------------------------------------
-# Admin panel callbacks (FIXED to use context.bot directly)
+# Admin panel callbacks
 # ----------------------------------------------------------------------
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS: return
@@ -762,7 +759,7 @@ async def admin_vid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text("تم إرسال ملف الفيدانج.")
 
 # ----------------------------------------------------------------------
-# Admin input handler (unchanged)
+# Admin input handler
 # ----------------------------------------------------------------------
 async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -791,12 +788,21 @@ async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"✅ تم تعيين آخر فيدانج لـ {code} = {km} كم.")
 
 # ----------------------------------------------------------------------
-# Commands (now safe for both message and callback via the universal helpers)
+# Commands
 # ----------------------------------------------------------------------
 async def dashboard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _send_dashboard_to_group(context)
     if update.message:
         await update.message.reply_text("تم إرسال لوحة القيادة إلى المجموعة.")
+
+async def vehicles_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List all available vehicles (no topic needed)."""
+    vehicles = get_all_vehicles()
+    if not vehicles:
+        await update.message.reply_text("لا توجد مركبات مسجلة.")
+        return
+    text = "🚘 المركبات المتاحة:\n" + "\n".join(f"• {v}" for v in vehicles)
+    await update.message.reply_text(text)
 
 async def export_problems(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file = generate_problems_excel()
@@ -828,7 +834,11 @@ async def send_dashboard(context: ContextTypes.DEFAULT_TYPE):
 
 async def weekly_excel(context: ContextTypes.DEFAULT_TYPE):
     file = generate_problems_excel()
-    await context.bot.send_document(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_GENERAL, document=file, filename="المشاكل_الأسبوعي.xlsx")
+    try:
+        await context.bot.send_document(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_GENERAL, document=file, filename="المشاكل_الأسبوعي.xlsx")
+    except Exception as e:
+        logging.warning(f"Weekly Excel topic error: {e}. Falling back.")
+        await context.bot.send_document(chat_id=ADMIN_GROUP_ID, document=file, filename="المشاكل_الأسبوعي.xlsx")
 
 async def vidange_reminder(context: ContextTypes.DEFAULT_TYPE):
     conn = get_conn()
@@ -892,18 +902,22 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
+    # Commands
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("vehicles", vehicles_cmd))   # <-- NEW
     app.add_handler(CommandHandler("dashboard", dashboard_cmd))
     app.add_handler(CommandHandler("export", export_problems))
     app.add_handler(CommandHandler("export_vidange", export_vidange))
     app.add_handler(CommandHandler("vidange", export_vidange_vehicle))
     app.add_handler(CommandHandler("admin", admin_panel))
 
+    # Text handlers
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_km_input), group=1)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_input_handler), group=2)
     app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.VOICE, handle_media))
 
+    # Callbacks
     app.add_handler(CallbackQueryHandler(vehicle_selection_callback, pattern="^selv_"))
     app.add_handler(CallbackQueryHandler(valide_callback, pattern="^val_"))
     app.add_handler(CallbackQueryHandler(ruglee_callback, pattern="^rug_"))
