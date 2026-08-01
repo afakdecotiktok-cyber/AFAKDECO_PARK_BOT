@@ -366,6 +366,26 @@ def status_emoji(vehicle: str) -> str:
     return "🟢"
 
 # ----------------------------------------------------------------------
+# Universal send helpers (used by both commands and callbacks)
+# ----------------------------------------------------------------------
+async def _reply_or_send(update: Update, context: ContextTypes.DEFAULT_TYPE, **kwargs):
+    """Reply to the message that triggered the update (works for both Message and CallbackQuery)."""
+    if update.message:
+        await update.message.reply_document(**kwargs)
+    elif update.callback_query:
+        await context.bot.send_document(chat_id=update.callback_query.message.chat_id, **kwargs)
+    else:
+        pass
+
+async def _send_dashboard_to_group(context: ContextTypes.DEFAULT_TYPE):
+    vehicles = get_all_vehicles()
+    if not vehicles: return
+    buttons = [InlineKeyboardButton(f"{status_emoji(v)} {v}", callback_data=f"hist_{v}") for v in vehicles]
+    markup = InlineKeyboardMarkup([buttons[i:i+4] for i in range(0, len(buttons), 4)])
+    await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_GENERAL,
+        text="📊 الحالة الحالية للمركبات:\n🟢 جيدة | 🟠 قيد المعالجة | 🔴 سيئة", reply_markup=markup)
+
+# ----------------------------------------------------------------------
 # Handlers
 # ----------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -683,7 +703,7 @@ async def settings_change_name(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.edit_message_text("أرسل اسمك الجديد:")
 
 # ----------------------------------------------------------------------
-# Admin panel callbacks
+# Admin panel callbacks (FIXED to use context.bot directly)
 # ----------------------------------------------------------------------
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS: return
@@ -722,23 +742,27 @@ async def admin_dash(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if query.from_user.id not in ADMIN_IDS: return
-    await dashboard_cmd(update, context)
+    await _send_dashboard_to_group(context)
     await query.edit_message_text("تم إرسال لوحة القيادة.")
 
 async def admin_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if query.from_user.id not in ADMIN_IDS: return
-    await export_problems(update, context)
+    file = generate_problems_excel()
+    await context.bot.send_document(chat_id=query.message.chat_id, document=file, filename="المشاكل.xlsx")
+    await query.edit_message_text("تم إرسال ملف المشاكل.")
 
 async def admin_vid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if query.from_user.id not in ADMIN_IDS: return
-    await export_vidange(update, context)
+    file = generate_vidange_excel()
+    await context.bot.send_document(chat_id=query.message.chat_id, document=file, filename="الفيدانج.xlsx")
+    await query.edit_message_text("تم إرسال ملف الفيدانج.")
 
 # ----------------------------------------------------------------------
-# Admin input handler
+# Admin input handler (unchanged)
 # ----------------------------------------------------------------------
 async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -767,23 +791,26 @@ async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"✅ تم تعيين آخر فيدانج لـ {code} = {km} كم.")
 
 # ----------------------------------------------------------------------
-# Commands
+# Commands (now safe for both message and callback via the universal helpers)
 # ----------------------------------------------------------------------
 async def dashboard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    vehicles = get_all_vehicles()
-    if not vehicles: await update.message.reply_text("لا توجد مركبات."); return
-    buttons = [InlineKeyboardButton(f"{status_emoji(v)} {v}", callback_data=f"hist_{v}") for v in vehicles]
-    markup = InlineKeyboardMarkup([buttons[i:i+4] for i in range(0, len(buttons), 4)])
-    await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_GENERAL,
-        text="📊 الحالة الحالية للمركبات:\n🟢 جيدة | 🟠 قيد المعالجة | 🔴 سيئة", reply_markup=markup)
+    await _send_dashboard_to_group(context)
+    if update.message:
+        await update.message.reply_text("تم إرسال لوحة القيادة إلى المجموعة.")
 
 async def export_problems(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file = generate_problems_excel()
-    await update.message.reply_document(document=file, filename="المشاكل.xlsx")
+    if update.message:
+        await update.message.reply_document(document=file, filename="المشاكل.xlsx")
+    else:
+        await context.bot.send_document(chat_id=update.effective_chat.id, document=file, filename="المشاكل.xlsx")
 
 async def export_vidange(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file = generate_vidange_excel()
-    await update.message.reply_document(document=file, filename="الفيدانج.xlsx")
+    if update.message:
+        await update.message.reply_document(document=file, filename="الفيدانج.xlsx")
+    else:
+        await context.bot.send_document(chat_id=update.effective_chat.id, document=file, filename="الفيدانج.xlsx")
 
 async def export_vidange_vehicle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     code = context.args[0].upper() if context.args else None
@@ -797,12 +824,7 @@ async def export_vidange_vehicle(update: Update, context: ContextTypes.DEFAULT_T
 # Scheduled jobs
 # ----------------------------------------------------------------------
 async def send_dashboard(context: ContextTypes.DEFAULT_TYPE):
-    vehicles = get_all_vehicles()
-    if not vehicles: return
-    buttons = [InlineKeyboardButton(f"{status_emoji(v)} {v}", callback_data=f"hist_{v}") for v in vehicles]
-    markup = InlineKeyboardMarkup([buttons[i:i+4] for i in range(0, len(buttons), 4)])
-    await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_GENERAL,
-        text="📊 الحالة اليومية للمركبات:\n🟢 جيدة | 🟠 قيد المعالجة | 🔴 سيئة", reply_markup=markup)
+    await _send_dashboard_to_group(context)
 
 async def weekly_excel(context: ContextTypes.DEFAULT_TYPE):
     file = generate_problems_excel()
