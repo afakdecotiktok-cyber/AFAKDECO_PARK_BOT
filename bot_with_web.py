@@ -53,7 +53,7 @@ if ADMIN_IDS_STR:
         if uid.isdigit():
             ADMIN_IDS.add(int(uid))
 
-# Timezone for Algeria (UTC+1)
+# Algeria timezone
 TZ = ZoneInfo("Africa/Algiers")
 
 # ----------------------------------------------------------------------
@@ -125,7 +125,7 @@ def init_db():
     conn.close()
 
 # ----------------------------------------------------------------------
-# Database functions
+# Database functions (unchanged except additions)
 # ----------------------------------------------------------------------
 def get_driver(user_id: int) -> dict | None:
     conn = get_conn()
@@ -262,6 +262,15 @@ def add_km_reading(vehicle: str, km: int):
     cur.close()
     conn.close()
 
+def get_latest_km(vehicle: str) -> int | None:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT km FROM km_readings WHERE vehicle=%s ORDER BY date DESC LIMIT 1", (vehicle,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row[0] if row else None
+
 def get_last_vidange_km(vehicle: str) -> int:
     conn = get_conn()
     cur = conn.cursor()
@@ -291,12 +300,20 @@ def has_active_vidange(vehicle: str) -> bool:
 def get_vehicle_status(vehicle: str) -> str:
     conn = get_conn()
     cur = conn.cursor()
+    # Red: any unresolved problem with status 'قيد الانتظار'
     cur.execute(
         "SELECT COUNT(*) FROM problems WHERE vehicle=%s AND status='قيد الانتظار' AND ruglee != 'تم الإصلاح'",
         (vehicle,)
     )
     if cur.fetchone()[0] > 0:
         return 'bad'
+    # Red also if km very close to vidange limit (≥ last_vidange + 9500)
+    last_km = get_latest_km(vehicle)
+    if last_km:
+        last_vid = get_last_vidange_km(vehicle)
+        if last_vid > 0 and last_km >= last_vid + 9500:
+            return 'bad'
+    # Orange: any unresolved problem with status 'قيد التصليح'
     cur.execute(
         "SELECT COUNT(*) FROM problems WHERE vehicle=%s AND status='قيد التصليح' AND ruglee != 'تم الإصلاح'",
         (vehicle,)
@@ -306,7 +323,7 @@ def get_vehicle_status(vehicle: str) -> str:
     return 'good'
 
 # ----------------------------------------------------------------------
-# Excel generation with colored rows
+# Excel generation (unchanged)
 # ----------------------------------------------------------------------
 def generate_problems_excel() -> BytesIO:
     problems = get_all_problems()
@@ -314,18 +331,12 @@ def generate_problems_excel() -> BytesIO:
     ws = wb.active
     ws.title = "المشاكل"
     headers = ["التاريخ", "السائق", "المركبة", "المشكلة", "نوع الوسائط", "الحالة", "تم الإصلاح", "تعليقات"]
-    # Header formatting
     for col, h in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=col, value=h)
-        cell.font = Font(bold=True)
-
-    # Color fills
-    red_fill = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")   # light red
-    orange_fill = PatternFill(start_color="FFE5CC", end_color="FFE5CC", fill_type="solid") # light orange
-    green_fill = PatternFill(start_color="CCFFCC", end_color="CCFFCC", fill_type="solid")  # light green
-
+        ws.cell(row=1, column=col, value=h).font = Font(bold=True)
+    red_fill = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")
+    orange_fill = PatternFill(start_color="FFE5CC", end_color="FFE5CC", fill_type="solid")
+    green_fill = PatternFill(start_color="CCFFCC", end_color="CCFFCC", fill_type="solid")
     for row_idx, p in enumerate(problems, 2):
-        # Determine row color based on status
         if p["ruglee"] == "تم الإصلاح":
             row_fill = green_fill
         elif p["status"] == "قيد الانتظار":
@@ -334,19 +345,15 @@ def generate_problems_excel() -> BytesIO:
             row_fill = orange_fill
         else:
             row_fill = None
-
-        values = [p["date"], p["driver_name"], p["vehicle"], p["problem_text"], p["media_type"] or "—",
-                  p["status"], p["ruglee"], p["comments"] or ""]
-        for col_idx, val in enumerate(values, 1):
-            cell = ws.cell(row=row_idx, column=col_idx, value=val)
+        vals = [p["date"], p["driver_name"], p["vehicle"], p["problem_text"], p["media_type"] or "—",
+                p["status"], p["ruglee"], p["comments"] or ""]
+        for ci, val in enumerate(vals, 1):
+            cell = ws.cell(row=row_idx, column=ci, value=val)
             if row_fill:
                 cell.fill = row_fill
-
-    # Adjust column widths
     for col in ws.columns:
         max_len = max((len(str(c.value)) for c in col if c.value), default=0)
-        ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_len + 2, 50)
-
+        ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_len+2, 50)
     out = BytesIO()
     wb.save(out)
     out.seek(0)
@@ -371,7 +378,7 @@ def generate_vidange_excel(vehicle_code: str = None) -> BytesIO:
         conn.close()
         for col in ws.columns:
             max_len = max((len(str(c.value)) for c in col if c.value), default=0)
-            ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_len + 2, 50)
+            ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_len+2, 50)
     out = BytesIO()
     wb.save(out)
     out.seek(0)
@@ -395,9 +402,7 @@ def status_emoji(vehicle: str) -> str:
     if s == 'en_cours': return "🟠"
     return "🟢"
 
-# ----------------------------------------------------------------------
-# Topic-specific admin panel keyboards
-# ----------------------------------------------------------------------
+# Topic‑specific admin panels
 TOPIC_ACTIONS = {
     TOPIC_GENERAL: [
         [InlineKeyboardButton("📊 لوحة القيادة", callback_data="admin_dash")],
@@ -414,6 +419,7 @@ TOPIC_ACTIONS = {
     ],
     TOPIC_VIDANGE: [
         [InlineKeyboardButton("🛢️ تصدير الفيدانج", callback_data="admin_vid")],
+        [InlineKeyboardButton("🚨 طلب فيدانج عاجل", callback_data="admin_urgentvid")],
         [InlineKeyboardButton("📋 تصدير المشاكل", callback_data="admin_export")],
     ],
     TOPIC_VEHICLE_MGMT: [
@@ -478,14 +484,34 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ تم حفظ التعليق بنجاح.", reply_markup=MAIN_KEYBOARD)
         return
 
-    # ----- km after vidange repair -----
+    # ----- km after vidange repair (driver enters new km) -----
     if context.user_data.get("await_km"):
         vehicle = context.user_data["await_km_vehicle"]
         if text.isdigit():
             km = int(text)
-            add_km_reading(vehicle, km)
-            set_last_vidange_km(vehicle, km)
-            await update.message.reply_text(f"✅ تم تحديث العداد إلى {km} كم.", reply_markup=MAIN_KEYBOARD)
+            last_km = get_latest_km(vehicle)
+            if last_km is not None and km <= last_km:
+                await update.message.reply_text(f"⚠️ الكيلومتر يجب أن يكون أكبر من آخر قراءة ({last_km} كم). أعد إدخال القيمة الصحيحة.")
+                return
+            # Send to VIDANGE topic for admin verification
+            driver_name = driver["name"] if driver else "Unknown"
+            msg = await context.bot.send_message(
+                chat_id=ADMIN_GROUP_ID,
+                message_thread_id=TOPIC_VIDANGE,
+                text=f"⚙️ تأكيد تحديث الفيدانج:\nالمركبة: {vehicle}\nالقيمة المدخلة: {km} كم\nالسائق: {driver_name}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ تأكيد", callback_data=f"vidconfirm_{user_id}_{km}"),
+                     InlineKeyboardButton("✏️ تعديل", callback_data=f"vidmodify_{user_id}")]
+                ])
+            )
+            # Store pending verification
+            context.application.bot_data.setdefault("pending_vidange", {})[msg.message_id] = {
+                "user_id": user_id,
+                "vehicle": vehicle,
+                "km": km
+            }
+            await update.message.reply_text("تم إرسال القيمة للمراجعة من قبل المشرفين.", reply_markup=MAIN_KEYBOARD)
+            context.user_data.pop("await_km_vehicle", None)
             context.user_data.clear()
             return
         else:
@@ -515,12 +541,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not problems:
             await update.message.reply_text("لا توجد مشاكل بحاجة للتحقق من إصلاحها.", reply_markup=MAIN_KEYBOARD)
             return
-        # Filter out problems that already have a validation request pending (validation_requester != 0)
-        pending_problems = [p for p in problems if p["validation_requester"] == 0]
-        if not pending_problems:
-            await update.message.reply_text("لا توجد مشاكل بحاجة للتحقق من إصلاحها (جميعها قيد المعالجة).", reply_markup=MAIN_KEYBOARD)
+        pending = [p for p in problems if p["validation_requester"] == 0]
+        if not pending:
+            await update.message.reply_text("لا توجد مشاكل بحاجة للتحقق (جميعها قيد المعالجة).", reply_markup=MAIN_KEYBOARD)
             return
-        buttons = [InlineKeyboardButton(f"مشكلة #{p['id']} - {p['problem_text'][:30]}...", callback_data=f"valreq_{p['id']}") for p in pending_problems]
+        buttons = [InlineKeyboardButton(f"مشكلة #{p['id']} - {p['problem_text'][:30]}...", callback_data=f"valreq_{p['id']}") for p in pending]
         await update.message.reply_text("اختر المشكلة التي تم إصلاحها:", reply_markup=InlineKeyboardMarkup([buttons[i:i+2] for i in range(0, len(buttons), 2)]))
         return
 
@@ -541,12 +566,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("اختر الإعداد المطلوب:", reply_markup=markup)
         return
 
-    # ----- Reclamation / km input -----
+    # ----- Reclamation / km input (with persistent validation) -----
     if context.user_data.get("expecting_reclamation"):
-        context.user_data.pop("expecting_reclamation")
         if not text:
             await update.message.reply_text("الرجاء كتابة وصف للمشكلة. لا يمكن إرسال شكوى فارغة.", reply_markup=MAIN_KEYBOARD)
-            return
+            return  # stay in expecting_reclamation mode
+        context.user_data.pop("expecting_reclamation")
         if not driver or not driver["name"] or not driver["vehicle"]:
             await update.message.reply_text("ملفك غير مكتمل.")
             return
@@ -557,23 +582,27 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if context.user_data.get("expecting_km"):
-        context.user_data.pop("expecting_km")
-        if not driver or not driver["vehicle"]:
-            await update.message.reply_text("ملف غير مكتمل.")
-            return
         if not text.isdigit():
             await update.message.reply_text("يجب إرسال رقم.")
-            return
+            return  # stay in expecting_km mode
         km = int(text)
-        vehicle = driver["vehicle"]
+        vehicle = driver["vehicle"] if driver else None
+        if not vehicle:
+            await update.message.reply_text("ملف غير مكتمل.")
+            return
+        last_km = get_latest_km(vehicle)
+        if last_km is not None and km <= last_km:
+            await update.message.reply_text(f"⚠️ الكيلومتر يجب أن يكون أكبر من آخر قراءة ({last_km} كم). أعد إدخال القيمة الصحيحة.")
+            return  # stay in expecting_km mode
+        # Value is valid
+        context.user_data.pop("expecting_km")
         add_km_reading(vehicle, km)
-        last_km = get_last_vidange_km(vehicle)
-        if last_km > 0 and km >= last_km + 9000 and not has_active_vidange(vehicle):
-            # Use driver's name with (نظام) suffix
+        last_vid = get_last_vidange_km(vehicle)
+        if last_vid > 0 and km >= last_vid + 9000 and not has_active_vidange(vehicle):
             vidange_problem_id = add_problem(user_id, f"{driver['name']} (نظام)", vehicle, f"Vidange {vehicle}", "نظام")
             await context.bot.send_message(
                 chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_VIDANGE,
-                text=f"⚠️ تنبيه فيدانج: المركبة {vehicle}\nالعداد الحالي: {km} كم\nآخر فيدانج: {last_km} كم",
+                text=f"⚠️ تنبيه فيدانج: المركبة {vehicle}\nالعداد الحالي: {km} كم\nآخر فيدانج: {last_vid} كم",
                 reply_markup=build_problem_keyboard(vidange_problem_id)
             )
         await update.message.reply_text(f"تم تسجيل العداد: {km} كم.", reply_markup=MAIN_KEYBOARD)
@@ -610,14 +639,13 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("تم إرسال الشكوى.", reply_markup=MAIN_KEYBOARD)
 
 # ----------------------------------------------------------------------
-# Callback handlers
+# Callback handlers (unchanged except new additions)
 # ----------------------------------------------------------------------
 async def vehicle_selection_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     vehicle = query.data.split("_", 1)[1]
     user_id = query.from_user.id
-    # Store chosen vehicle for confirmation
     context.user_data["confirm_vehicle"] = vehicle
     await query.edit_message_text(f"هل تريد تعيين المركبة {vehicle}؟", reply_markup=InlineKeyboardMarkup([
         [InlineKeyboardButton("نعم", callback_data=f"confirmveh_{vehicle}"),
@@ -636,7 +664,6 @@ async def confirm_vehicle_callback(update: Update, context: ContextTypes.DEFAULT
 async def cancel_vehicle_selection_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    # Go back to vehicle selection
     vehicles = get_all_vehicles()
     await query.edit_message_text("اختر مركبتك:", reply_markup=vehicle_inline_keyboard(vehicles, "selv_"))
 
@@ -725,7 +752,6 @@ async def validation_request_callback(update: Update, context: ContextTypes.DEFA
     problem_id = int(query.data.split("_")[1])
     problem = get_problem(problem_id)
     if not problem: return await query.answer("غير موجود.")
-    # Check if validation already requested
     if problem["validation_requester"] != 0:
         await query.answer("تم إرسال طلب تحقق سابقاً لهذه المشكلة.", show_alert=True)
         return
@@ -737,42 +763,45 @@ async def validation_request_callback(update: Update, context: ContextTypes.DEFA
                                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ تم الإصلاح", callback_data=f"rug_{problem_id}")]]))
     await query.edit_message_text("تم إرسال طلب التحقق.")
 
-async def handle_km_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    text = update.message.text.strip()
-    if not text.isdigit(): return
-    km = int(text)
-    await_data = context.application.bot_data.get("km_await", {})
-    vehicle = await_data.pop(user_id, None)
-    if vehicle:
-        add_km_reading(vehicle, km)
-        set_last_vidange_km(vehicle, km)
-        await update.message.reply_text(f"✅ تم تحديث الفيدانج: {km} كم.", reply_markup=MAIN_KEYBOARD)
-
-async def vehicle_history_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def vidange_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    vehicle = query.data.split("_", 1)[1]
-    conn = get_conn()
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT * FROM problems WHERE vehicle=%s ORDER BY date DESC", (vehicle,))
-    problems = [dict(r) for r in cur.fetchall()]
-    cur.execute("SELECT date, km FROM km_readings WHERE vehicle=%s ORDER BY date DESC LIMIT 5", (vehicle,))
-    readings = cur.fetchall()
-    cur.close()
-    conn.close()
-    text = f"🚘 تاريخ المركبة {vehicle}:\n"
-    if problems:
-        text += "\n📋 المشاكل:\n"
-        for p in problems:
-            text += f"  #{p['id']} | {p['date']} | {p['problem_text'][:40]} | {p['status']} | {p['ruglee']}\n"
-    else:
-        text += "لا توجد مشاكل مسجلة.\n"
-    if readings:
-        text += "\n🛢️ آخر قراءات العداد:\n"
-        for d, k in readings:
-            text += f"  {d} - {k} كم\n"
-    await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_HISTORY, text=text)
+    if query.from_user.id not in ADMIN_IDS:
+        await query.answer("⛔ غير مصرح.", show_alert=True); return
+    data = query.data.split("_")  # vidconfirm_userid_km
+    user_id = int(data[1])
+    km = int(data[2])
+    pending = context.application.bot_data.get("pending_vidange", {})
+    info = pending.pop(query.message.message_id, None)
+    if not info:
+        await query.answer("انتهت صلاحية الطلب.", show_alert=True)
+        return
+    vehicle = info["vehicle"]
+    add_km_reading(vehicle, km)
+    set_last_vidange_km(vehicle, km)
+    await query.edit_message_text(f"✅ تم تأكيد الفيدانج للمركبة {vehicle} بقيمة {km} كم.")
+    try:
+        await context.bot.send_message(chat_id=user_id, text=f"✅ تم اعتماد تحديث الفيدانج للمركبة {vehicle}: {km} كم.")
+    except: pass
+
+async def vidange_modify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.from_user.id not in ADMIN_IDS:
+        await query.answer("⛔ غير مصرح.", show_alert=True); return
+    data = query.data.split("_")  # vidmodify_userid
+    user_id = int(data[1])
+    pending = context.application.bot_data.get("pending_vidange", {})
+    info = pending.get(query.message.message_id)
+    if not info:
+        await query.answer("انتهت صلاحية الطلب.", show_alert=True)
+        return
+    context.user_data["vidange_modify"] = {
+        "user_id": user_id,
+        "vehicle": info["vehicle"],
+        "message_id": query.message.message_id
+    }
+    await query.edit_message_text("✏️ أرسل القيمة الصحيحة للكيلومتر بعد الفيدانج:")
 
 # ----------------------------------------------------------------------
 # Settings callbacks
@@ -803,45 +832,29 @@ async def settings_change_name(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.edit_message_text("أرسل اسمك الجديد:")
 
 # ----------------------------------------------------------------------
-# Admin panel: topic-specific panel command
+# Admin panel / topic panels
 # ----------------------------------------------------------------------
 async def panel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Command /panel that shows topic-specific admin actions."""
-    if update.effective_user.id not in ADMIN_IDS:
-        return
+    if update.effective_user.id not in ADMIN_IDS: return
     thread_id = update.message.message_thread_id if update.message else None
     keyboard = get_topic_keyboard(thread_id) if thread_id else None
     if keyboard:
         await update.message.reply_text("🕹️ لوحة التحكم الخاصة بهذا القسم:", reply_markup=keyboard)
     else:
-        # Fallback to full admin panel
         await admin_panel(update, context)
 
-# ----------------------------------------------------------------------
-# Old admin panel (full)
-# ----------------------------------------------------------------------
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS: return
     markup = InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ إضافة مركبة", callback_data="admin_addveh")],
         [InlineKeyboardButton("➖ حذف مركبة", callback_data="admin_remveh")],
         [InlineKeyboardButton("⚙️ تعيين فيدانج", callback_data="admin_setvid")],
+        [InlineKeyboardButton("🚨 طلب فيدانج عاجل", callback_data="admin_urgentvid")],
         [InlineKeyboardButton("📊 لوحة القيادة", callback_data="admin_dash")],
         [InlineKeyboardButton("📋 تصدير المشاكل", callback_data="admin_export")],
         [InlineKeyboardButton("🛢️ تصدير الفيدانج", callback_data="admin_vid")],
     ])
     await update.message.reply_text("🕹️ لوحة التحكم الكاملة:", reply_markup=markup)
-
-# ----------------------------------------------------------------------
-# Admin callbacks (unchanged, but we added admin_listveh for vehicle list)
-# ----------------------------------------------------------------------
-async def admin_listveh(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if query.from_user.id not in ADMIN_IDS: return
-    vehicles = get_all_vehicles()
-    text = "🚘 المركبات المتاحة:\n" + "\n".join(f"• {v}" for v in vehicles) if vehicles else "لا توجد مركبات."
-    await query.edit_message_text(text)
 
 async def admin_addveh(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -887,13 +900,81 @@ async def admin_vid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_document(chat_id=query.message.chat_id, document=file, filename="الفيدانج.xlsx")
     await query.edit_message_text("تم إرسال ملف الفيدانج.")
 
+async def admin_listveh(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.from_user.id not in ADMIN_IDS: return
+    vehicles = get_all_vehicles()
+    text = "🚘 المركبات المتاحة:\n" + "\n".join(f"• {v}" for v in vehicles) if vehicles else "لا توجد مركبات."
+    await query.edit_message_text(text)
+
+async def admin_urgentvid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.from_user.id not in ADMIN_IDS: return
+    await query.edit_message_text("أرسل رمز المركبة ثم الكيلومتر الجديد للفيدانج العاجل (مثال: M02 158000):")
+    context.user_data["admin_urgentvid"] = True
+
 # ----------------------------------------------------------------------
-# Admin input handler (unchanged)
+# Admin input handler (includes vidange modification, urgent, etc.)
 # ----------------------------------------------------------------------
 async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in ADMIN_IDS: return
     text = update.message.text.strip()
+
+    if context.user_data.get("vidange_modify"):
+        info = context.user_data.pop("vidange_modify")
+        if not text.isdigit():
+            await update.message.reply_text("يجب أن يكون الكيلومتر رقماً. حاول مرة أخرى:")
+            context.user_data["vidange_modify"] = info
+            return
+        km = int(text)
+        vehicle = info["vehicle"]
+        last_km = get_latest_km(vehicle)
+        if last_km is not None and km <= last_km:
+            await update.message.reply_text(f"⚠️ الكيلومتر يجب أن يكون أكبر من آخر قراءة ({last_km} كم). أعد الإدخال.")
+            context.user_data["vidange_modify"] = info
+            return
+        add_km_reading(vehicle, km)
+        set_last_vidange_km(vehicle, km)
+        try:
+            await context.bot.edit_message_text(
+                chat_id=ADMIN_GROUP_ID,
+                message_id=info["message_id"],
+                text=f"✅ تم تعديل الفيدانج للمركبة {vehicle} إلى {km} كم."
+            )
+        except: pass
+        try:
+            await context.bot.send_message(chat_id=info["user_id"], text=f"✅ تم تحديث الفيدانج للمركبة {vehicle} بقيمة {km} كم (بعد المراجعة).")
+        except: pass
+        await update.message.reply_text(f"✅ تم تحديث الفيدانج لـ {vehicle} = {km} كم.")
+        context.application.bot_data.get("pending_vidange", {}).pop(info["message_id"], None)
+        return
+
+    if context.user_data.get("admin_urgentvid"):
+        context.user_data.pop("admin_urgentvid")
+        parts = text.split()
+        if len(parts) != 2 or not parts[1].isdigit():
+            await update.message.reply_text("صيغة خاطئة. استخدم: CODE KM")
+            return
+        code = parts[0].upper()
+        km = int(parts[1])
+        if code not in get_all_vehicles():
+            await update.message.reply_text("المركبة غير موجودة.")
+            return
+        set_last_vidange_km(code, km)
+        latest = get_latest_km(code)
+        if latest is not None and latest >= km + 9000:
+            vidange_problem_id = add_problem(0, "نظام (عاجل)", code, f"Vidange عاجل {code}", "نظام")
+            await context.bot.send_message(
+                chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_VIDANGE,
+                text=f"🚨 فيدانج عاجل: المركبة {code}\nالعداد الحالي: {latest} كم\nآخر فيدانج (محدث): {km} كم",
+                reply_markup=build_problem_keyboard(vidange_problem_id)
+            )
+        await update.message.reply_text(f"✅ تم تعيين آخر فيدانج عاجل للمركبة {code} = {km} كم.")
+        return
+
     if context.user_data.get("admin_add_veh"):
         context.user_data.pop("admin_add_veh")
         add_vehicle(text.upper())
@@ -917,7 +998,7 @@ async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"✅ تم تعيين آخر فيدانج لـ {code} = {km} كم.")
 
 # ----------------------------------------------------------------------
-# Old admin commands (still available)
+# Old admin commands
 # ----------------------------------------------------------------------
 async def add_vehicle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS: return
@@ -943,8 +1024,24 @@ async def set_vidange_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_last_vidange_km(code, km)
     await update.message.reply_text(f"✅ تم تعيين آخر فيدانج لـ {code} = {km} كم.")
 
+async def urgent_vidange_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS: return
+    if len(context.args) < 2: await update.message.reply_text("استخدم: /urgentvidange CODE KM"); return
+    code = context.args[0].upper()
+    try: km = int(context.args[1])
+    except: await update.message.reply_text("يجب أن يكون الكيلومتر رقماً."); return
+    if code not in get_all_vehicles(): await update.message.reply_text("المركبة غير موجودة."); return
+    set_last_vidange_km(code, km)
+    latest = get_latest_km(code)
+    if latest is not None and latest >= km + 9000:
+        vidange_problem_id = add_problem(0, "نظام (عاجل)", code, f"Vidange عاجل {code}", "نظام")
+        await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_VIDANGE,
+            text=f"🚨 فيدانج عاجل: المركبة {code}\nالعداد الحالي: {latest} كم\nآخر فيدانج (محدث): {km} كم",
+            reply_markup=build_problem_keyboard(vidange_problem_id))
+    await update.message.reply_text(f"✅ تم تعيين آخر فيدانج عاجل للمركبة {code} = {km} كم.")
+
 # ----------------------------------------------------------------------
-# Commands
+# Commands (dashboard, vehicles, export)
 # ----------------------------------------------------------------------
 async def dashboard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _send_dashboard_to_group(context)
@@ -1016,20 +1113,17 @@ async def vidange_reminder(context: ContextTypes.DEFAULT_TYPE):
 def schedule_jobs(app: Application):
     now = datetime.now(TZ)
     target = time(7, 30, 0)
-    # Daily dashboard at 7:30 Algeria time
     next_daily = datetime.combine(now.date(), target, tzinfo=TZ)
     if now >= next_daily:
         next_daily += timedelta(days=1)
     app.job_queue.run_repeating(send_dashboard, interval=24*60*60, first=next_daily)
 
-    # Weekly Excel on Saturday 7:30 Algeria time
     days_until_sat = (5 - now.weekday()) % 7
     next_sat = datetime.combine(now.date() + timedelta(days=days_until_sat), target, tzinfo=TZ)
     if now >= next_sat:
         next_sat += timedelta(days=7)
     app.job_queue.run_repeating(weekly_excel, interval=7*24*60*60, first=next_sat)
 
-    # Vidange reminder every 3 days at 10:00 Algeria time
     reminder_time = time(10, 0, 0)
     next_reminder = datetime.combine(now.date(), reminder_time, tzinfo=TZ)
     if now >= next_reminder:
@@ -1064,27 +1158,23 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Command handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("vehicles", vehicles_cmd))
     app.add_handler(CommandHandler("dashboard", dashboard_cmd))
     app.add_handler(CommandHandler("export", export_problems))
     app.add_handler(CommandHandler("export_vidange", export_vidange))
     app.add_handler(CommandHandler("vidange", export_vidange_vehicle))
-    app.add_handler(CommandHandler("admin", admin_panel))          # full panel
-    app.add_handler(CommandHandler("panel", panel_cmd))            # topic-specific panel
-    # Old admin commands
+    app.add_handler(CommandHandler("admin", admin_panel))
+    app.add_handler(CommandHandler("panel", panel_cmd))
     app.add_handler(CommandHandler("addvehicle", add_vehicle_cmd))
     app.add_handler(CommandHandler("removevehicle", remove_vehicle_cmd))
     app.add_handler(CommandHandler("setvidange", set_vidange_cmd))
+    app.add_handler(CommandHandler("urgentvidange", urgent_vidange_cmd))
 
-    # Text handlers
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_km_input), group=1)
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_input_handler), group=2)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_input_handler), group=1)
     app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.VOICE, handle_media))
 
-    # Callback handlers
     app.add_handler(CallbackQueryHandler(vehicle_selection_callback, pattern="^selv_"))
     app.add_handler(CallbackQueryHandler(confirm_vehicle_callback, pattern="^confirmveh_"))
     app.add_handler(CallbackQueryHandler(cancel_vehicle_selection_callback, pattern="^cancel_veh$"))
@@ -1106,6 +1196,9 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_export, pattern="^admin_export$"))
     app.add_handler(CallbackQueryHandler(admin_vid, pattern="^admin_vid$"))
     app.add_handler(CallbackQueryHandler(admin_listveh, pattern="^admin_listveh$"))
+    app.add_handler(CallbackQueryHandler(admin_urgentvid, pattern="^admin_urgentvid$"))
+    app.add_handler(CallbackQueryHandler(vidange_confirm_callback, pattern="^vidconfirm_"))
+    app.add_handler(CallbackQueryHandler(vidange_modify_callback, pattern="^vidmodify_"))
 
     app.add_error_handler(error_handler)
     schedule_jobs(app)
