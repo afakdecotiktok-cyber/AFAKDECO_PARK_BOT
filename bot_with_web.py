@@ -323,7 +323,7 @@ def get_vehicle_status(vehicle: str) -> str:
     return 'good'
 
 # ----------------------------------------------------------------------
-# Excel generation (unchanged)
+# Excel generation
 # ----------------------------------------------------------------------
 def generate_problems_excel() -> BytesIO:
     problems = get_all_problems()
@@ -477,14 +477,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     driver = get_driver(user_id)
     state = driver["state"] if driver else "name_entry"
 
-    # ----- comment session -----
     if context.user_data.get("awaiting_comment"):
         problem_id = context.user_data.pop("awaiting_comment")
         set_problem_comment(problem_id, text)
         await update.message.reply_text("✅ تم حفظ التعليق بنجاح.", reply_markup=MAIN_KEYBOARD)
         return
 
-    # ----- km after vidange repair (driver enters new km) -----
     if context.user_data.get("await_km"):
         vehicle = context.user_data["await_km_vehicle"]
         if text.isdigit():
@@ -493,7 +491,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if last_km is not None and km <= last_km:
                 await update.message.reply_text(f"⚠️ الكيلومتر يجب أن يكون أكبر من آخر قراءة ({last_km} كم). أعد إدخال القيمة الصحيحة.")
                 return
-            # Send to VIDANGE topic for admin verification
             driver_name = driver["name"] if driver else "Unknown"
             msg = await context.bot.send_message(
                 chat_id=ADMIN_GROUP_ID,
@@ -504,7 +501,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                      InlineKeyboardButton("✏️ تعديل", callback_data=f"vidmodify_{user_id}")]
                 ])
             )
-            # Store pending verification
             context.application.bot_data.setdefault("pending_vidange", {})[msg.message_id] = {
                 "user_id": user_id,
                 "vehicle": vehicle,
@@ -518,7 +514,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("الرجاء إرسال رقم صحيح.")
             return
 
-    # ----- state machine -----
     if state == "name_entry":
         set_driver(user_id, name=text, state="vehicle_selection")
         vehicles = get_all_vehicles()
@@ -530,7 +525,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("الرجاء اختيار المركبة من القائمة:", reply_markup=vehicle_inline_keyboard(vehicles, "selv_"))
         return
 
-    # ----- Main keyboard buttons -----
     if text == "📝 تقديم شكوى":
         await update.message.reply_text("أرسل وصف المشكلة (نص، صورة، فيديو، أو صوت).", reply_markup=MAIN_KEYBOARD)
         context.user_data["expecting_reclamation"] = True
@@ -566,11 +560,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("اختر الإعداد المطلوب:", reply_markup=markup)
         return
 
-    # ----- Reclamation / km input (with persistent validation) -----
     if context.user_data.get("expecting_reclamation"):
         if not text:
             await update.message.reply_text("الرجاء كتابة وصف للمشكلة. لا يمكن إرسال شكوى فارغة.", reply_markup=MAIN_KEYBOARD)
-            return  # stay in expecting_reclamation mode
+            return
         context.user_data.pop("expecting_reclamation")
         if not driver or not driver["name"] or not driver["vehicle"]:
             await update.message.reply_text("ملفك غير مكتمل.")
@@ -584,7 +577,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("expecting_km"):
         if not text.isdigit():
             await update.message.reply_text("يجب إرسال رقم.")
-            return  # stay in expecting_km mode
+            return
         km = int(text)
         vehicle = driver["vehicle"] if driver else None
         if not vehicle:
@@ -593,8 +586,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         last_km = get_latest_km(vehicle)
         if last_km is not None and km <= last_km:
             await update.message.reply_text(f"⚠️ الكيلومتر يجب أن يكون أكبر من آخر قراءة ({last_km} كم). أعد إدخال القيمة الصحيحة.")
-            return  # stay in expecting_km mode
-        # Value is valid
+            return
         context.user_data.pop("expecting_km")
         add_km_reading(vehicle, km)
         last_vid = get_last_vidange_km(vehicle)
@@ -639,7 +631,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("تم إرسال الشكوى.", reply_markup=MAIN_KEYBOARD)
 
 # ----------------------------------------------------------------------
-# Callback handlers (unchanged except new additions)
+# Callback handlers
 # ----------------------------------------------------------------------
 async def vehicle_selection_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -804,6 +796,34 @@ async def vidange_modify_callback(update: Update, context: ContextTypes.DEFAULT_
     await query.edit_message_text("✏️ أرسل القيمة الصحيحة للكيلومتر بعد الفيدانج:")
 
 # ----------------------------------------------------------------------
+# ✅ MISSING FUNCTION: vehicle history callback
+# ----------------------------------------------------------------------
+async def vehicle_history_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    vehicle = query.data.split("_", 1)[1]
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("SELECT * FROM problems WHERE vehicle=%s ORDER BY date DESC", (vehicle,))
+    problems = [dict(r) for r in cur.fetchall()]
+    cur.execute("SELECT date, km FROM km_readings WHERE vehicle=%s ORDER BY date DESC LIMIT 5", (vehicle,))
+    readings = cur.fetchall()
+    cur.close()
+    conn.close()
+    text = f"🚘 تاريخ المركبة {vehicle}:\n"
+    if problems:
+        text += "\n📋 المشاكل:\n"
+        for p in problems:
+            text += f"  #{p['id']} | {p['date']} | {p['problem_text'][:40]} | {p['status']} | {p['ruglee']}\n"
+    else:
+        text += "لا توجد مشاكل مسجلة.\n"
+    if readings:
+        text += "\n🛢️ آخر قراءات العداد:\n"
+        for d, k in readings:
+            text += f"  {d} - {k} كم\n"
+    await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_HISTORY, text=text)
+
+# ----------------------------------------------------------------------
 # Settings callbacks
 # ----------------------------------------------------------------------
 async def settings_change_vehicle(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -916,7 +936,7 @@ async def admin_urgentvid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["admin_urgentvid"] = True
 
 # ----------------------------------------------------------------------
-# Admin input handler (includes vidange modification, urgent, etc.)
+# Admin input handler
 # ----------------------------------------------------------------------
 async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -1041,7 +1061,7 @@ async def urgent_vidange_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text(f"✅ تم تعيين آخر فيدانج عاجل للمركبة {code} = {km} كم.")
 
 # ----------------------------------------------------------------------
-# Commands (dashboard, vehicles, export)
+# Commands
 # ----------------------------------------------------------------------
 async def dashboard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _send_dashboard_to_group(context)
@@ -1079,7 +1099,7 @@ async def export_vidange_vehicle(update: Update, context: ContextTypes.DEFAULT_T
     await update.message.reply_document(document=file, filename=f"فيدانج_{code}.xlsx")
 
 # ----------------------------------------------------------------------
-# Scheduled jobs (Algeria time)
+# Scheduled jobs
 # ----------------------------------------------------------------------
 async def send_dashboard(context: ContextTypes.DEFAULT_TYPE):
     await _send_dashboard_to_group(context)
