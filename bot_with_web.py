@@ -6,13 +6,14 @@ from zoneinfo import ZoneInfo
 import psycopg2, psycopg2.extras
 from flask import Flask
 from openpyxl import Workbook
-from openpyxl.styles import Font
+from openpyxl.styles import Font, PatternFill
+from openpyxl.utils import get_column_letter
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 # ----------------------------------------------------------------------
-# Flask app – runs in a daemon thread so the main thread can run the bot
+# Flask app
 # ----------------------------------------------------------------------
 web_app = Flask(__name__)
 
@@ -290,14 +291,12 @@ def has_active_vidange(vehicle: str) -> bool:
 def get_vehicle_status(vehicle: str) -> str:
     conn = get_conn()
     cur = conn.cursor()
-    # Red: any unresolved problem with status 'قيد الانتظار'
     cur.execute(
         "SELECT COUNT(*) FROM problems WHERE vehicle=%s AND status='قيد الانتظار' AND ruglee != 'تم الإصلاح'",
         (vehicle,)
     )
     if cur.fetchone()[0] > 0:
         return 'bad'
-    # Orange: any unresolved problem with status 'قيد التصليح'
     cur.execute(
         "SELECT COUNT(*) FROM problems WHERE vehicle=%s AND status='قيد التصليح' AND ruglee != 'تم الإصلاح'",
         (vehicle,)
@@ -307,7 +306,7 @@ def get_vehicle_status(vehicle: str) -> str:
     return 'good'
 
 # ----------------------------------------------------------------------
-# Excel generation
+# Excel generation with colored rows
 # ----------------------------------------------------------------------
 def generate_problems_excel() -> BytesIO:
     problems = get_all_problems()
@@ -315,20 +314,39 @@ def generate_problems_excel() -> BytesIO:
     ws = wb.active
     ws.title = "المشاكل"
     headers = ["التاريخ", "السائق", "المركبة", "المشكلة", "نوع الوسائط", "الحالة", "تم الإصلاح", "تعليقات"]
+    # Header formatting
     for col, h in enumerate(headers, 1):
-        ws.cell(row=1, column=col, value=h).font = Font(bold=True)
+        cell = ws.cell(row=1, column=col, value=h)
+        cell.font = Font(bold=True)
+
+    # Color fills
+    red_fill = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")   # light red
+    orange_fill = PatternFill(start_color="FFE5CC", end_color="FFE5CC", fill_type="solid") # light orange
+    green_fill = PatternFill(start_color="CCFFCC", end_color="CCFFCC", fill_type="solid")  # light green
+
     for row_idx, p in enumerate(problems, 2):
-        ws.cell(row=row_idx, column=1, value=p["date"])
-        ws.cell(row=row_idx, column=2, value=p["driver_name"])
-        ws.cell(row=row_idx, column=3, value=p["vehicle"])
-        ws.cell(row=row_idx, column=4, value=p["problem_text"])
-        ws.cell(row=row_idx, column=5, value=p["media_type"] or "—")
-        ws.cell(row=row_idx, column=6, value=p["status"])
-        ws.cell(row=row_idx, column=7, value=p["ruglee"])
-        ws.cell(row=row_idx, column=8, value=p["comments"] or "")
+        # Determine row color based on status
+        if p["ruglee"] == "تم الإصلاح":
+            row_fill = green_fill
+        elif p["status"] == "قيد الانتظار":
+            row_fill = red_fill
+        elif p["status"] == "قيد التصليح":
+            row_fill = orange_fill
+        else:
+            row_fill = None
+
+        values = [p["date"], p["driver_name"], p["vehicle"], p["problem_text"], p["media_type"] or "—",
+                  p["status"], p["ruglee"], p["comments"] or ""]
+        for col_idx, val in enumerate(values, 1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=val)
+            if row_fill:
+                cell.fill = row_fill
+
+    # Adjust column widths
     for col in ws.columns:
         max_len = max((len(str(c.value)) for c in col if c.value), default=0)
-        ws.column_dimensions[col[0].column_letter].width = min(max_len+2, 50)
+        ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_len + 2, 50)
+
     out = BytesIO()
     wb.save(out)
     out.seek(0)
@@ -353,7 +371,7 @@ def generate_vidange_excel(vehicle_code: str = None) -> BytesIO:
         conn.close()
         for col in ws.columns:
             max_len = max((len(str(c.value)) for c in col if c.value), default=0)
-            ws.column_dimensions[col[0].column_letter].width = min(max_len+2, 50)
+            ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_len + 2, 50)
     out = BytesIO()
     wb.save(out)
     out.seek(0)
@@ -378,7 +396,44 @@ def status_emoji(vehicle: str) -> str:
     return "🟢"
 
 # ----------------------------------------------------------------------
-# Helper: send dashboard to group (with fallback)
+# Topic-specific admin panel keyboards
+# ----------------------------------------------------------------------
+TOPIC_ACTIONS = {
+    TOPIC_GENERAL: [
+        [InlineKeyboardButton("📊 لوحة القيادة", callback_data="admin_dash")],
+        [InlineKeyboardButton("📋 تصدير المشاكل", callback_data="admin_export")],
+        [InlineKeyboardButton("🛢️ تصدير الفيدانج", callback_data="admin_vid")],
+    ],
+    TOPIC_RECLAMATIONS: [
+        [InlineKeyboardButton("📊 لوحة القيادة", callback_data="admin_dash")],
+        [InlineKeyboardButton("📋 تصدير المشاكل", callback_data="admin_export")],
+    ],
+    TOPIC_VALIDATION: [
+        [InlineKeyboardButton("📊 لوحة القيادة", callback_data="admin_dash")],
+        [InlineKeyboardButton("📋 تصدير المشاكل", callback_data="admin_export")],
+    ],
+    TOPIC_VIDANGE: [
+        [InlineKeyboardButton("🛢️ تصدير الفيدانج", callback_data="admin_vid")],
+        [InlineKeyboardButton("📋 تصدير المشاكل", callback_data="admin_export")],
+    ],
+    TOPIC_VEHICLE_MGMT: [
+        [InlineKeyboardButton("➕ إضافة مركبة", callback_data="admin_addveh")],
+        [InlineKeyboardButton("➖ حذف مركبة", callback_data="admin_remveh")],
+        [InlineKeyboardButton("🚘 قائمة المركبات", callback_data="admin_listveh")],
+    ],
+    TOPIC_HISTORY: [
+        [InlineKeyboardButton("📊 لوحة القيادة", callback_data="admin_dash")],
+    ],
+}
+
+def get_topic_keyboard(thread_id: int) -> InlineKeyboardMarkup | None:
+    actions = TOPIC_ACTIONS.get(thread_id)
+    if actions:
+        return InlineKeyboardMarkup(actions)
+    return None
+
+# ----------------------------------------------------------------------
+# Dashboard helper
 # ----------------------------------------------------------------------
 async def _send_dashboard_to_group(context: ContextTypes.DEFAULT_TYPE):
     vehicles = get_all_vehicles()
@@ -460,7 +515,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not problems:
             await update.message.reply_text("لا توجد مشاكل بحاجة للتحقق من إصلاحها.", reply_markup=MAIN_KEYBOARD)
             return
-        buttons = [InlineKeyboardButton(f"مشكلة #{p['id']} - {p['problem_text'][:30]}...", callback_data=f"valreq_{p['id']}") for p in problems]
+        # Filter out problems that already have a validation request pending (validation_requester != 0)
+        pending_problems = [p for p in problems if p["validation_requester"] == 0]
+        if not pending_problems:
+            await update.message.reply_text("لا توجد مشاكل بحاجة للتحقق من إصلاحها (جميعها قيد المعالجة).", reply_markup=MAIN_KEYBOARD)
+            return
+        buttons = [InlineKeyboardButton(f"مشكلة #{p['id']} - {p['problem_text'][:30]}...", callback_data=f"valreq_{p['id']}") for p in pending_problems]
         await update.message.reply_text("اختر المشكلة التي تم إصلاحها:", reply_markup=InlineKeyboardMarkup([buttons[i:i+2] for i in range(0, len(buttons), 2)]))
         return
 
@@ -484,7 +544,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ----- Reclamation / km input -----
     if context.user_data.get("expecting_reclamation"):
         context.user_data.pop("expecting_reclamation")
-        # Reject empty reclamation
         if not text:
             await update.message.reply_text("الرجاء كتابة وصف للمشكلة. لا يمكن إرسال شكوى فارغة.", reply_markup=MAIN_KEYBOARD)
             return
@@ -510,8 +569,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         add_km_reading(vehicle, km)
         last_km = get_last_vidange_km(vehicle)
         if last_km > 0 and km >= last_km + 9000 and not has_active_vidange(vehicle):
-            # ✅ FIXED: use the driver's user_id so they can later request validation
-            vidange_problem_id = add_problem(user_id, "نظام", vehicle, f"Vidange {vehicle}", "نظام")
+            # Use driver's name with (نظام) suffix
+            vidange_problem_id = add_problem(user_id, f"{driver['name']} (نظام)", vehicle, f"Vidange {vehicle}", "نظام")
             await context.bot.send_message(
                 chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_VIDANGE,
                 text=f"⚠️ تنبيه فيدانج: المركبة {vehicle}\nالعداد الحالي: {km} كم\nآخر فيدانج: {last_km} كم",
@@ -558,9 +617,28 @@ async def vehicle_selection_callback(update: Update, context: ContextTypes.DEFAU
     await query.answer()
     vehicle = query.data.split("_", 1)[1]
     user_id = query.from_user.id
+    # Store chosen vehicle for confirmation
+    context.user_data["confirm_vehicle"] = vehicle
+    await query.edit_message_text(f"هل تريد تعيين المركبة {vehicle}؟", reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("نعم", callback_data=f"confirmveh_{vehicle}"),
+         InlineKeyboardButton("إلغاء", callback_data="cancel_veh")]
+    ]))
+
+async def confirm_vehicle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    vehicle = query.data.split("_", 1)[1]
+    user_id = query.from_user.id
     set_driver(user_id, vehicle=vehicle, state="idle")
     await query.edit_message_text(f"تم تعيين المركبة إلى {vehicle}.")
     await context.bot.send_message(chat_id=user_id, text="يمكنك الآن استخدام الأزرار أدناه:", reply_markup=MAIN_KEYBOARD)
+
+async def cancel_vehicle_selection_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    # Go back to vehicle selection
+    vehicles = get_all_vehicles()
+    await query.edit_message_text("اختر مركبتك:", reply_markup=vehicle_inline_keyboard(vehicles, "selv_"))
 
 async def valide_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -647,6 +725,10 @@ async def validation_request_callback(update: Update, context: ContextTypes.DEFA
     problem_id = int(query.data.split("_")[1])
     problem = get_problem(problem_id)
     if not problem: return await query.answer("غير موجود.")
+    # Check if validation already requested
+    if problem["validation_requester"] != 0:
+        await query.answer("تم إرسال طلب تحقق سابقاً لهذه المشكلة.", show_alert=True)
+        return
     update_problem_status(problem_id, validation_requester=query.from_user.id)
     driver = get_driver(query.from_user.id)
     driver_name = driver["name"] if driver else "Unknown"
@@ -721,7 +803,22 @@ async def settings_change_name(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.edit_message_text("أرسل اسمك الجديد:")
 
 # ----------------------------------------------------------------------
-# Admin panel callbacks
+# Admin panel: topic-specific panel command
+# ----------------------------------------------------------------------
+async def panel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Command /panel that shows topic-specific admin actions."""
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    thread_id = update.message.message_thread_id if update.message else None
+    keyboard = get_topic_keyboard(thread_id) if thread_id else None
+    if keyboard:
+        await update.message.reply_text("🕹️ لوحة التحكم الخاصة بهذا القسم:", reply_markup=keyboard)
+    else:
+        # Fallback to full admin panel
+        await admin_panel(update, context)
+
+# ----------------------------------------------------------------------
+# Old admin panel (full)
 # ----------------------------------------------------------------------
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS: return
@@ -733,7 +830,18 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📋 تصدير المشاكل", callback_data="admin_export")],
         [InlineKeyboardButton("🛢️ تصدير الفيدانج", callback_data="admin_vid")],
     ])
-    await update.message.reply_text("🕹️ لوحة التحكم:", reply_markup=markup)
+    await update.message.reply_text("🕹️ لوحة التحكم الكاملة:", reply_markup=markup)
+
+# ----------------------------------------------------------------------
+# Admin callbacks (unchanged, but we added admin_listveh for vehicle list)
+# ----------------------------------------------------------------------
+async def admin_listveh(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.from_user.id not in ADMIN_IDS: return
+    vehicles = get_all_vehicles()
+    text = "🚘 المركبات المتاحة:\n" + "\n".join(f"• {v}" for v in vehicles) if vehicles else "لا توجد مركبات."
+    await query.edit_message_text(text)
 
 async def admin_addveh(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -780,7 +888,7 @@ async def admin_vid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text("تم إرسال ملف الفيدانج.")
 
 # ----------------------------------------------------------------------
-# Admin input handler
+# Admin input handler (unchanged)
 # ----------------------------------------------------------------------
 async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -963,7 +1071,8 @@ def main():
     app.add_handler(CommandHandler("export", export_problems))
     app.add_handler(CommandHandler("export_vidange", export_vidange))
     app.add_handler(CommandHandler("vidange", export_vidange_vehicle))
-    app.add_handler(CommandHandler("admin", admin_panel))
+    app.add_handler(CommandHandler("admin", admin_panel))          # full panel
+    app.add_handler(CommandHandler("panel", panel_cmd))            # topic-specific panel
     # Old admin commands
     app.add_handler(CommandHandler("addvehicle", add_vehicle_cmd))
     app.add_handler(CommandHandler("removevehicle", remove_vehicle_cmd))
@@ -977,6 +1086,8 @@ def main():
 
     # Callback handlers
     app.add_handler(CallbackQueryHandler(vehicle_selection_callback, pattern="^selv_"))
+    app.add_handler(CallbackQueryHandler(confirm_vehicle_callback, pattern="^confirmveh_"))
+    app.add_handler(CallbackQueryHandler(cancel_vehicle_selection_callback, pattern="^cancel_veh$"))
     app.add_handler(CallbackQueryHandler(valide_callback, pattern="^val_"))
     app.add_handler(CallbackQueryHandler(ruglee_callback, pattern="^rug_"))
     app.add_handler(CallbackQueryHandler(comment_callback, pattern="^com_"))
@@ -994,6 +1105,7 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_dash, pattern="^admin_dash$"))
     app.add_handler(CallbackQueryHandler(admin_export, pattern="^admin_export$"))
     app.add_handler(CallbackQueryHandler(admin_vid, pattern="^admin_vid$"))
+    app.add_handler(CallbackQueryHandler(admin_listveh, pattern="^admin_listveh$"))
 
     app.add_error_handler(error_handler)
     schedule_jobs(app)
