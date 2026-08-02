@@ -1,6 +1,7 @@
 import os, sys, logging, threading, asyncio
 from datetime import datetime, time, timedelta
 from io import BytesIO
+from zoneinfo import ZoneInfo
 
 import psycopg2, psycopg2.extras
 from flask import Flask
@@ -11,7 +12,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 # ----------------------------------------------------------------------
-# Flask app
+# Flask app – runs in a daemon thread so the main thread can run the bot
 # ----------------------------------------------------------------------
 web_app = Flask(__name__)
 
@@ -50,6 +51,9 @@ if ADMIN_IDS_STR:
         uid = uid.strip()
         if uid.isdigit():
             ADMIN_IDS.add(int(uid))
+
+# Timezone for Algeria (UTC+1)
+TZ = ZoneInfo("Africa/Algiers")
 
 # ----------------------------------------------------------------------
 # PostgreSQL helper
@@ -120,7 +124,7 @@ def init_db():
     conn.close()
 
 # ----------------------------------------------------------------------
-# Database functions
+# Database functions (unchanged, all present)
 # ----------------------------------------------------------------------
 def get_driver(user_id: int) -> dict | None:
     conn = get_conn()
@@ -178,7 +182,7 @@ def remove_vehicle(code: str):
 def add_problem(user_id: int, driver_name: str, vehicle: str, problem_text: str, media_type: str) -> int:
     conn = get_conn()
     cur = conn.cursor()
-    date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    date = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
     cur.execute(
         "INSERT INTO problems (user_id, driver_name, vehicle, problem_text, media_type, date) VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
         (user_id, driver_name, vehicle, problem_text, media_type, date)
@@ -251,7 +255,7 @@ def get_driver_problems(user_id: int, status_filter: str = None) -> list:
 def add_km_reading(vehicle: str, km: int):
     conn = get_conn()
     cur = conn.cursor()
-    date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    date = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
     cur.execute("INSERT INTO km_readings (vehicle, km, date) VALUES (%s,%s,%s)", (vehicle, km, date))
     conn.commit()
     cur.close()
@@ -366,7 +370,7 @@ def status_emoji(vehicle: str) -> str:
     return "🟢"
 
 # ----------------------------------------------------------------------
-# Helper to safely send dashboard
+# Helper: send dashboard to group (with fallback)
 # ----------------------------------------------------------------------
 async def _send_dashboard_to_group(context: ContextTypes.DEFAULT_TYPE):
     vehicles = get_all_vehicles()
@@ -377,13 +381,12 @@ async def _send_dashboard_to_group(context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_GENERAL,
             text="📊 الحالة اليومية للمركبات:\n🟢 جيدة | 🟠 قيد المعالجة | 🔴 سيئة", reply_markup=markup)
     except Exception as e:
-        # Fallback: send without thread (main general chat, works if bot is admin but topic missing)
-        logging.warning(f"Dashboard topic error: {e}. Falling back to no thread.")
+        logging.warning(f"Dashboard topic error: {e}. Falling back.")
         await context.bot.send_message(chat_id=ADMIN_GROUP_ID,
             text="📊 الحالة اليومية للمركبات:\n🟢 جيدة | 🟠 قيد المعالجة | 🔴 سيئة", reply_markup=markup)
 
 # ----------------------------------------------------------------------
-# Handlers
+# Handlers (same as before, but using TZ for all timestamps)
 # ----------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -530,7 +533,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("تم إرسال الشكوى.", reply_markup=MAIN_KEYBOARD)
 
 # ----------------------------------------------------------------------
-# Callback handlers
+# Callback handlers (unchanged except using TZ)
 # ----------------------------------------------------------------------
 async def vehicle_selection_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -796,7 +799,6 @@ async def dashboard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("تم إرسال لوحة القيادة إلى المجموعة.")
 
 async def vehicles_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """List all available vehicles (no topic needed)."""
     vehicles = get_all_vehicles()
     if not vehicles:
         await update.message.reply_text("لا توجد مركبات مسجلة.")
@@ -827,7 +829,7 @@ async def export_vidange_vehicle(update: Update, context: ContextTypes.DEFAULT_T
     await update.message.reply_document(document=file, filename=f"فيدانج_{code}.xlsx")
 
 # ----------------------------------------------------------------------
-# Scheduled jobs
+# Scheduled jobs (Algeria time)
 # ----------------------------------------------------------------------
 async def send_dashboard(context: ContextTypes.DEFAULT_TYPE):
     await _send_dashboard_to_group(context)
@@ -850,8 +852,9 @@ async def vidange_reminder(context: ContextTypes.DEFAULT_TYPE):
         cur.execute("SELECT MAX(date) FROM km_readings WHERE vehicle=%s", (v,))
         last_date = cur.fetchone()[0]
         if last_date:
-            last_dt = datetime.strptime(last_date, "%Y-%m-%d %H:%M:%S")
-            if (datetime.now() - last_dt).days >= 3:
+            # Convert stored date (Algeria time) back to datetime for comparison
+            last_dt = datetime.strptime(last_date, "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ)
+            if (datetime.now(TZ) - last_dt).days >= 3:
                 try:
                     await context.bot.send_message(chat_id=d["user_id"], text=f"⏰ تذكير: لم تقم بإدخال الكيلومترات للمركبة {v} منذ أكثر من 3 أيام. الرجاء إدخالها.")
                 except: pass
@@ -859,19 +862,26 @@ async def vidange_reminder(context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
 def schedule_jobs(app: Application):
-    now = datetime.now()
-    t = time(7, 30, 0)
-    next_daily = datetime.combine(now.date(), t)
-    if now >= next_daily: next_daily += timedelta(days=1)
+    now = datetime.now(TZ)
+    target = time(7, 30, 0)
+    # Daily dashboard at 7:30 Algeria time
+    next_daily = datetime.combine(now.date(), target, tzinfo=TZ)
+    if now >= next_daily:
+        next_daily += timedelta(days=1)
     app.job_queue.run_repeating(send_dashboard, interval=24*60*60, first=next_daily)
 
+    # Weekly Excel on Saturday 7:30 Algeria time
     days_until_sat = (5 - now.weekday()) % 7
-    next_sat = datetime.combine(now.date() + timedelta(days=days_until_sat), t)
-    if now >= next_sat: next_sat += timedelta(days=7)
+    next_sat = datetime.combine(now.date() + timedelta(days=days_until_sat), target, tzinfo=TZ)
+    if now >= next_sat:
+        next_sat += timedelta(days=7)
     app.job_queue.run_repeating(weekly_excel, interval=7*24*60*60, first=next_sat)
 
-    next_reminder = datetime.combine(now.date(), time(10, 0))
-    if now >= next_reminder: next_reminder += timedelta(days=1)
+    # Vidange reminder every 3 days at 10:00 Algeria time
+    reminder_time = time(10, 0, 0)
+    next_reminder = datetime.combine(now.date(), reminder_time, tzinfo=TZ)
+    if now >= next_reminder:
+        next_reminder += timedelta(days=1)
     app.job_queue.run_repeating(vidange_reminder, interval=3*24*60*60, first=next_reminder)
 
 # ----------------------------------------------------------------------
@@ -902,9 +912,9 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Commands
+    # Command handlers
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("vehicles", vehicles_cmd))   # <-- NEW
+    app.add_handler(CommandHandler("vehicles", vehicles_cmd))
     app.add_handler(CommandHandler("dashboard", dashboard_cmd))
     app.add_handler(CommandHandler("export", export_problems))
     app.add_handler(CommandHandler("export_vidange", export_vidange))
@@ -917,7 +927,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_input_handler), group=2)
     app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.VOICE, handle_media))
 
-    # Callbacks
+    # Callback handlers
     app.add_handler(CallbackQueryHandler(vehicle_selection_callback, pattern="^selv_"))
     app.add_handler(CallbackQueryHandler(valide_callback, pattern="^val_"))
     app.add_handler(CallbackQueryHandler(ruglee_callback, pattern="^rug_"))
