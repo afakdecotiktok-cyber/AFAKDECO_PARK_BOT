@@ -12,7 +12,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 # ----------------------------------------------------------------------
-# Flask app – runs in a daemon thread so the main thread can run the bot
+# Flask app
 # ----------------------------------------------------------------------
 web_app = Flask(__name__)
 
@@ -21,7 +21,7 @@ def home():
     return "Bot is running."
 
 # ----------------------------------------------------------------------
-# Configuration – environment variables on Render
+# Configuration
 # ----------------------------------------------------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_GROUP_ID_STR = os.environ.get("ADMIN_GROUP_ID")
@@ -52,7 +52,7 @@ if ADMIN_IDS_STR:
         if uid.isdigit():
             ADMIN_IDS.add(int(uid))
 
-# Timezone for Algeria (UTC+1)
+# Algeria timezone
 TZ = ZoneInfo("Africa/Algiers")
 
 # ----------------------------------------------------------------------
@@ -124,7 +124,7 @@ def init_db():
     conn.close()
 
 # ----------------------------------------------------------------------
-# Database functions (unchanged, all present)
+# Database functions
 # ----------------------------------------------------------------------
 def get_driver(user_id: int) -> dict | None:
     conn = get_conn()
@@ -287,15 +287,25 @@ def has_active_vidange(vehicle: str) -> bool:
     conn.close()
     return row is not None
 
+# ✅ UPDATED vehicle status logic
 def get_vehicle_status(vehicle: str) -> str:
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM problems WHERE vehicle=%s AND status='قيد الانتظار'", (vehicle,))
+    # Red: any unresolved problem with status 'قيد الانتظار'
+    cur.execute(
+        "SELECT COUNT(*) FROM problems WHERE vehicle=%s AND status='قيد الانتظار' AND ruglee != 'تم الإصلاح'",
+        (vehicle,)
+    )
     if cur.fetchone()[0] > 0:
         return 'bad'
-    cur.execute("SELECT COUNT(*) FROM problems WHERE vehicle=%s AND status='قيد التصليح'", (vehicle,))
+    # Orange: any unresolved problem with status 'قيد التصليح'
+    cur.execute(
+        "SELECT COUNT(*) FROM problems WHERE vehicle=%s AND status='قيد التصليح' AND ruglee != 'تم الإصلاح'",
+        (vehicle,)
+    )
     if cur.fetchone()[0] > 0:
         return 'en_cours'
+    # Green: no unresolved problems
     return 'good'
 
 # ----------------------------------------------------------------------
@@ -370,7 +380,7 @@ def status_emoji(vehicle: str) -> str:
     return "🟢"
 
 # ----------------------------------------------------------------------
-# Helper: send dashboard to group (with fallback)
+# Dashboard helper
 # ----------------------------------------------------------------------
 async def _send_dashboard_to_group(context: ContextTypes.DEFAULT_TYPE):
     vehicles = get_all_vehicles()
@@ -386,7 +396,7 @@ async def _send_dashboard_to_group(context: ContextTypes.DEFAULT_TYPE):
             text="📊 الحالة اليومية للمركبات:\n🟢 جيدة | 🟠 قيد المعالجة | 🔴 سيئة", reply_markup=markup)
 
 # ----------------------------------------------------------------------
-# Handlers (same as before, but using TZ for all timestamps)
+# Handlers
 # ----------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -533,7 +543,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("تم إرسال الشكوى.", reply_markup=MAIN_KEYBOARD)
 
 # ----------------------------------------------------------------------
-# Callback handlers (unchanged except using TZ)
+# Callbacks
 # ----------------------------------------------------------------------
 async def vehicle_selection_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -829,7 +839,7 @@ async def export_vidange_vehicle(update: Update, context: ContextTypes.DEFAULT_T
     await update.message.reply_document(document=file, filename=f"فيدانج_{code}.xlsx")
 
 # ----------------------------------------------------------------------
-# Scheduled jobs (Algeria time)
+# Scheduled jobs (Algeria timezone)
 # ----------------------------------------------------------------------
 async def send_dashboard(context: ContextTypes.DEFAULT_TYPE):
     await _send_dashboard_to_group(context)
@@ -852,7 +862,6 @@ async def vidange_reminder(context: ContextTypes.DEFAULT_TYPE):
         cur.execute("SELECT MAX(date) FROM km_readings WHERE vehicle=%s", (v,))
         last_date = cur.fetchone()[0]
         if last_date:
-            # Convert stored date (Algeria time) back to datetime for comparison
             last_dt = datetime.strptime(last_date, "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ)
             if (datetime.now(TZ) - last_dt).days >= 3:
                 try:
@@ -864,20 +873,17 @@ async def vidange_reminder(context: ContextTypes.DEFAULT_TYPE):
 def schedule_jobs(app: Application):
     now = datetime.now(TZ)
     target = time(7, 30, 0)
-    # Daily dashboard at 7:30 Algeria time
     next_daily = datetime.combine(now.date(), target, tzinfo=TZ)
     if now >= next_daily:
         next_daily += timedelta(days=1)
     app.job_queue.run_repeating(send_dashboard, interval=24*60*60, first=next_daily)
 
-    # Weekly Excel on Saturday 7:30 Algeria time
     days_until_sat = (5 - now.weekday()) % 7
     next_sat = datetime.combine(now.date() + timedelta(days=days_until_sat), target, tzinfo=TZ)
     if now >= next_sat:
         next_sat += timedelta(days=7)
     app.job_queue.run_repeating(weekly_excel, interval=7*24*60*60, first=next_sat)
 
-    # Vidange reminder every 3 days at 10:00 Algeria time
     reminder_time = time(10, 0, 0)
     next_reminder = datetime.combine(now.date(), reminder_time, tzinfo=TZ)
     if now >= next_reminder:
@@ -885,7 +891,7 @@ def schedule_jobs(app: Application):
     app.job_queue.run_repeating(vidange_reminder, interval=3*24*60*60, first=next_reminder)
 
 # ----------------------------------------------------------------------
-# Problem keyboard builder
+# Problem keyboard
 # ----------------------------------------------------------------------
 def build_problem_keyboard(problem_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -912,7 +918,6 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Command handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("vehicles", vehicles_cmd))
     app.add_handler(CommandHandler("dashboard", dashboard_cmd))
@@ -921,13 +926,11 @@ def main():
     app.add_handler(CommandHandler("vidange", export_vidange_vehicle))
     app.add_handler(CommandHandler("admin", admin_panel))
 
-    # Text handlers
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_km_input), group=1)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_input_handler), group=2)
     app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.VOICE, handle_media))
 
-    # Callback handlers
     app.add_handler(CallbackQueryHandler(vehicle_selection_callback, pattern="^selv_"))
     app.add_handler(CallbackQueryHandler(valide_callback, pattern="^val_"))
     app.add_handler(CallbackQueryHandler(ruglee_callback, pattern="^rug_"))
