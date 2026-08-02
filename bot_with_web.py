@@ -12,7 +12,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 # ----------------------------------------------------------------------
-# Flask app
+# Flask app – runs in a daemon thread so the main thread can run the bot
 # ----------------------------------------------------------------------
 web_app = Flask(__name__)
 
@@ -21,7 +21,7 @@ def home():
     return "Bot is running."
 
 # ----------------------------------------------------------------------
-# Configuration
+# Configuration – environment variables on Render
 # ----------------------------------------------------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_GROUP_ID_STR = os.environ.get("ADMIN_GROUP_ID")
@@ -52,7 +52,7 @@ if ADMIN_IDS_STR:
         if uid.isdigit():
             ADMIN_IDS.add(int(uid))
 
-# Algeria timezone
+# Timezone for Algeria (UTC+1)
 TZ = ZoneInfo("Africa/Algiers")
 
 # ----------------------------------------------------------------------
@@ -287,7 +287,6 @@ def has_active_vidange(vehicle: str) -> bool:
     conn.close()
     return row is not None
 
-# ✅ UPDATED vehicle status logic
 def get_vehicle_status(vehicle: str) -> str:
     conn = get_conn()
     cur = conn.cursor()
@@ -305,7 +304,6 @@ def get_vehicle_status(vehicle: str) -> str:
     )
     if cur.fetchone()[0] > 0:
         return 'en_cours'
-    # Green: no unresolved problems
     return 'good'
 
 # ----------------------------------------------------------------------
@@ -380,7 +378,7 @@ def status_emoji(vehicle: str) -> str:
     return "🟢"
 
 # ----------------------------------------------------------------------
-# Dashboard helper
+# Helper: send dashboard to group (with fallback)
 # ----------------------------------------------------------------------
 async def _send_dashboard_to_group(context: ContextTypes.DEFAULT_TYPE):
     vehicles = get_all_vehicles()
@@ -418,12 +416,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     driver = get_driver(user_id)
     state = driver["state"] if driver else "name_entry"
 
+    # ----- comment session -----
     if context.user_data.get("awaiting_comment"):
         problem_id = context.user_data.pop("awaiting_comment")
         set_problem_comment(problem_id, text)
         await update.message.reply_text("✅ تم حفظ التعليق بنجاح.", reply_markup=MAIN_KEYBOARD)
         return
 
+    # ----- km after vidange repair -----
     if context.user_data.get("await_km"):
         vehicle = context.user_data["await_km_vehicle"]
         if text.isdigit():
@@ -437,6 +437,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("الرجاء إرسال رقم صحيح.")
             return
 
+    # ----- state machine -----
     if state == "name_entry":
         set_driver(user_id, name=text, state="vehicle_selection")
         vehicles = get_all_vehicles()
@@ -448,6 +449,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("الرجاء اختيار المركبة من القائمة:", reply_markup=vehicle_inline_keyboard(vehicles, "selv_"))
         return
 
+    # ----- Main keyboard buttons -----
     if text == "📝 تقديم شكوى":
         await update.message.reply_text("أرسل وصف المشكلة (نص، صورة، فيديو، أو صوت).", reply_markup=MAIN_KEYBOARD)
         context.user_data["expecting_reclamation"] = True
@@ -479,8 +481,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("اختر الإعداد المطلوب:", reply_markup=markup)
         return
 
+    # ----- Reclamation / km input -----
     if context.user_data.get("expecting_reclamation"):
         context.user_data.pop("expecting_reclamation")
+        # Reject empty reclamation
+        if not text:
+            await update.message.reply_text("الرجاء كتابة وصف للمشكلة. لا يمكن إرسال شكوى فارغة.", reply_markup=MAIN_KEYBOARD)
+            return
         if not driver or not driver["name"] or not driver["vehicle"]:
             await update.message.reply_text("ملفك غير مكتمل.")
             return
@@ -503,7 +510,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         add_km_reading(vehicle, km)
         last_km = get_last_vidange_km(vehicle)
         if last_km > 0 and km >= last_km + 9000 and not has_active_vidange(vehicle):
-            vidange_problem_id = add_problem(0, "نظام", vehicle, f"Vidange {vehicle}", "نظام")
+            # ✅ FIXED: use the driver's user_id so they can later request validation
+            vidange_problem_id = add_problem(user_id, "نظام", vehicle, f"Vidange {vehicle}", "نظام")
             await context.bot.send_message(
                 chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_VIDANGE,
                 text=f"⚠️ تنبيه فيدانج: المركبة {vehicle}\nالعداد الحالي: {km} كم\nآخر فيدانج: {last_km} كم",
@@ -543,7 +551,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("تم إرسال الشكوى.", reply_markup=MAIN_KEYBOARD)
 
 # ----------------------------------------------------------------------
-# Callbacks
+# Callback handlers
 # ----------------------------------------------------------------------
 async def vehicle_selection_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -801,6 +809,33 @@ async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"✅ تم تعيين آخر فيدانج لـ {code} = {km} كم.")
 
 # ----------------------------------------------------------------------
+# Old admin commands (still available)
+# ----------------------------------------------------------------------
+async def add_vehicle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS: return
+    code = context.args[0] if context.args else None
+    if not code: await update.message.reply_text("استخدم: /addvehicle CODE"); return
+    add_vehicle(code.upper())
+    await update.message.reply_text(f"✅ تمت إضافة {code.upper()}.")
+
+async def remove_vehicle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS: return
+    code = context.args[0] if context.args else None
+    if not code: await update.message.reply_text("استخدم: /removevehicle CODE"); return
+    remove_vehicle(code.upper())
+    await update.message.reply_text(f"🗑️ تم حذف {code.upper()}.")
+
+async def set_vidange_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS: return
+    if len(context.args) < 2: await update.message.reply_text("استخدم: /setvidange CODE KM"); return
+    code = context.args[0].upper()
+    try: km = int(context.args[1])
+    except: await update.message.reply_text("يجب أن يكون الكيلومتر رقماً."); return
+    if code not in get_all_vehicles(): await update.message.reply_text("المركبة غير موجودة."); return
+    set_last_vidange_km(code, km)
+    await update.message.reply_text(f"✅ تم تعيين آخر فيدانج لـ {code} = {km} كم.")
+
+# ----------------------------------------------------------------------
 # Commands
 # ----------------------------------------------------------------------
 async def dashboard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -839,7 +874,7 @@ async def export_vidange_vehicle(update: Update, context: ContextTypes.DEFAULT_T
     await update.message.reply_document(document=file, filename=f"فيدانج_{code}.xlsx")
 
 # ----------------------------------------------------------------------
-# Scheduled jobs (Algeria timezone)
+# Scheduled jobs (Algeria time)
 # ----------------------------------------------------------------------
 async def send_dashboard(context: ContextTypes.DEFAULT_TYPE):
     await _send_dashboard_to_group(context)
@@ -873,17 +908,20 @@ async def vidange_reminder(context: ContextTypes.DEFAULT_TYPE):
 def schedule_jobs(app: Application):
     now = datetime.now(TZ)
     target = time(7, 30, 0)
+    # Daily dashboard at 7:30 Algeria time
     next_daily = datetime.combine(now.date(), target, tzinfo=TZ)
     if now >= next_daily:
         next_daily += timedelta(days=1)
     app.job_queue.run_repeating(send_dashboard, interval=24*60*60, first=next_daily)
 
+    # Weekly Excel on Saturday 7:30 Algeria time
     days_until_sat = (5 - now.weekday()) % 7
     next_sat = datetime.combine(now.date() + timedelta(days=days_until_sat), target, tzinfo=TZ)
     if now >= next_sat:
         next_sat += timedelta(days=7)
     app.job_queue.run_repeating(weekly_excel, interval=7*24*60*60, first=next_sat)
 
+    # Vidange reminder every 3 days at 10:00 Algeria time
     reminder_time = time(10, 0, 0)
     next_reminder = datetime.combine(now.date(), reminder_time, tzinfo=TZ)
     if now >= next_reminder:
@@ -891,7 +929,7 @@ def schedule_jobs(app: Application):
     app.job_queue.run_repeating(vidange_reminder, interval=3*24*60*60, first=next_reminder)
 
 # ----------------------------------------------------------------------
-# Problem keyboard
+# Problem keyboard builder
 # ----------------------------------------------------------------------
 def build_problem_keyboard(problem_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -918,6 +956,7 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
+    # Command handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("vehicles", vehicles_cmd))
     app.add_handler(CommandHandler("dashboard", dashboard_cmd))
@@ -925,12 +964,18 @@ def main():
     app.add_handler(CommandHandler("export_vidange", export_vidange))
     app.add_handler(CommandHandler("vidange", export_vidange_vehicle))
     app.add_handler(CommandHandler("admin", admin_panel))
+    # Old admin commands
+    app.add_handler(CommandHandler("addvehicle", add_vehicle_cmd))
+    app.add_handler(CommandHandler("removevehicle", remove_vehicle_cmd))
+    app.add_handler(CommandHandler("setvidange", set_vidange_cmd))
 
+    # Text handlers
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_km_input), group=1)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_input_handler), group=2)
     app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.VOICE, handle_media))
 
+    # Callback handlers
     app.add_handler(CallbackQueryHandler(vehicle_selection_callback, pattern="^selv_"))
     app.add_handler(CallbackQueryHandler(valide_callback, pattern="^val_"))
     app.add_handler(CallbackQueryHandler(ruglee_callback, pattern="^rug_"))
