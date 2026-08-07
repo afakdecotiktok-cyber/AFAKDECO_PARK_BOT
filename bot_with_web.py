@@ -18,7 +18,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 web_app = Flask(__name__)
 
 # ----------------------------------------------------------------------
-# Environment variables (Render)
+# Environment variables
 # ----------------------------------------------------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_GROUP_ID_STR = os.environ.get("ADMIN_GROUP_ID")
@@ -50,14 +50,12 @@ if ADMIN_IDS_STR:
         if uid.isdigit():
             ADMIN_IDS.add(int(uid))
 
-# Algeria timezone
 TZ = ZoneInfo("Africa/Algiers")
 
 # ----------------------------------------------------------------------
-# PostgreSQL helper (using Supabase Pooler connection)
+# PostgreSQL helper (Supabase)
 # ----------------------------------------------------------------------
 def get_conn():
-    # Supabase connection via pooler (port 5432 or 6543)
     return psycopg2.connect(DATABASE_URL, sslmode='require')
 
 def init_db():
@@ -98,7 +96,6 @@ def init_db():
             group_message_id BIGINT DEFAULT 0
         )
     ''')
-    # Add columns if they don't exist
     for col, typ in [("validation_requester", "BIGINT DEFAULT 0"), ("group_message_id", "BIGINT DEFAULT 0")]:
         try:
             cur.execute(f"ALTER TABLE problems ADD COLUMN {col} {typ}")
@@ -141,7 +138,7 @@ def init_db():
     conn.close()
 
 # ----------------------------------------------------------------------
-# Database functions
+# Database functions (all as before, plus new additions)
 # ----------------------------------------------------------------------
 def get_driver(user_id: int) -> dict | None:
     conn = get_conn()
@@ -407,8 +404,17 @@ def get_all_drivers():
     conn.close()
     return [dict(r) for r in rows]
 
+def remove_driver(user_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM drivers WHERE user_id=%s", (user_id,))
+    cur.execute("DELETE FROM allowed_users WHERE user_id=%s", (user_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
 # ----------------------------------------------------------------------
-# Excel generation
+# Excel generation (already included)
 # ----------------------------------------------------------------------
 def generate_problems_excel() -> BytesIO:
     problems = get_all_problems()
@@ -470,7 +476,7 @@ def generate_vidange_excel(vehicle_code: str = None) -> BytesIO:
     return out
 
 # ----------------------------------------------------------------------
-# Keyboards
+# Keyboards & Helpers
 # ----------------------------------------------------------------------
 MAIN_KEYBOARD = ReplyKeyboardMarkup([
     [KeyboardButton("📝 تقديم شكوى"), KeyboardButton("✅ طلب التحقق من الإصلاح")],
@@ -495,7 +501,6 @@ def dashboard_button_text(vehicle: str) -> str:
     line2 = f"   {rem} كم" if isinstance(rem, int) else "   —"
     return f"{line1}\n{line2}"
 
-# Admin submenus
 def admin_main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🚘 تعديل المركبات", callback_data="admin_vehicles")],
@@ -533,63 +538,6 @@ def admin_export_menu_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("↩️ رجوع", callback_data="admin_main")]
     ])
 
-TOPIC_ACTIONS = {
-    TOPIC_GENERAL: [
-        [InlineKeyboardButton("📊 لوحة القيادة", callback_data="admin_dash")],
-        [InlineKeyboardButton("📋 تصدير المشاكل", callback_data="admin_export")],
-        [InlineKeyboardButton("🛢️ تصدير الفيدانج", callback_data="admin_vid")],
-    ],
-    TOPIC_RECLAMATIONS: [
-        [InlineKeyboardButton("📊 لوحة القيادة", callback_data="admin_dash")],
-        [InlineKeyboardButton("📋 تصدير المشاكل", callback_data="admin_export")],
-    ],
-    TOPIC_VALIDATION: [
-        [InlineKeyboardButton("📊 لوحة القيادة", callback_data="admin_dash")],
-        [InlineKeyboardButton("📋 تصدير المشاكل", callback_data="admin_export")],
-    ],
-    TOPIC_VIDANGE: [
-        [InlineKeyboardButton("🛢️ تصدير الفيدانج", callback_data="admin_vid")],
-        [InlineKeyboardButton("🚨 طلب فيدانج عاجل", callback_data="admin_urgentvid")],
-        [InlineKeyboardButton("📋 تصدير المشاكل", callback_data="admin_export")],
-    ],
-    TOPIC_VEHICLE_MGMT: [
-        [InlineKeyboardButton("➕ إضافة مركبة", callback_data="admin_addveh")],
-        [InlineKeyboardButton("➖ حذف مركبة", callback_data="admin_remveh")],
-        [InlineKeyboardButton("🚘 قائمة المركبات", callback_data="admin_listveh")],
-    ],
-    TOPIC_HISTORY: [
-        [InlineKeyboardButton("📊 لوحة القيادة", callback_data="admin_dash")],
-    ],
-}
-
-def get_topic_keyboard(thread_id: int) -> InlineKeyboardMarkup | None:
-    actions = TOPIC_ACTIONS.get(thread_id)
-    if actions:
-        return InlineKeyboardMarkup(actions)
-    return None
-
-# ----------------------------------------------------------------------
-# Webhook
-# ----------------------------------------------------------------------
-async def set_webhook(app: Application):
-    webhook_url = f"{WEBHOOK_URL}/telegram"
-    await app.bot.set_webhook(url=webhook_url)
-    logging.info(f"Webhook set to {webhook_url}")
-
-@web_app.route('/telegram', methods=['POST'])
-async def telegram_webhook():
-    data = request.get_json()
-    update = Update.de_json(data, app.bot)
-    await app.process_update(update)
-    return jsonify({"status": "ok"})
-
-@web_app.route('/')
-def home():
-    return "Bot is running."
-
-# ----------------------------------------------------------------------
-# Status helpers
-# ----------------------------------------------------------------------
 def status_icon_and_text(problem: dict) -> str:
     if problem["ruglee"] == "تم الإصلاح":
         return "🟢 مُصلح"
@@ -625,7 +573,26 @@ def build_problem_keyboard(problem_id: int, initial: bool = False) -> InlineKeyb
     return InlineKeyboardMarkup(rows)
 
 # ----------------------------------------------------------------------
-# Handlers (abbreviated, full version below)
+# Webhook
+# ----------------------------------------------------------------------
+async def set_webhook(app: Application):
+    webhook_url = f"{WEBHOOK_URL}/telegram"
+    await app.bot.set_webhook(url=webhook_url)
+    logging.info(f"Webhook set to {webhook_url}")
+
+@web_app.route('/telegram', methods=['POST'])
+async def telegram_webhook():
+    data = request.get_json()
+    update = Update.de_json(data, app.bot)
+    await app.process_update(update)
+    return jsonify({"status": "ok"})
+
+@web_app.route('/')
+def home():
+    return "Bot is running."
+
+# ----------------------------------------------------------------------
+# Handlers
 # ----------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -652,7 +619,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     driver = get_driver(user_id)
     state = driver["state"] if driver else "name_entry"
 
-    # Block non-allowed users (unless super admin)
+    # Non-allowed users (unless super admin)
     if user_id not in ADMIN_IDS and not is_allowed(user_id):
         if state == "name_entry":
             set_driver(user_id, name=text, state="awaiting_approval", approval_status="pending")
@@ -674,14 +641,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("غير مصرح لك باستخدام البوت حالياً.")
             return
 
-    # comment session
+    # Comment session
     if context.user_data.get("awaiting_comment"):
         problem_id = context.user_data.pop("awaiting_comment")
         set_problem_comment(problem_id, text)
         await update.message.reply_text("✅ تم حفظ التعليق بنجاح.", reply_markup=MAIN_KEYBOARD)
         return
 
-    # km after vidange repair
+    # KM after vidange repair
     if context.user_data.get("await_km"):
         vehicle = context.user_data["await_km_vehicle"]
         if text.isdigit():
@@ -713,7 +680,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("الرجاء إرسال رقم صحيح.")
             return
 
-    # state machine
+    # State machine
     if state == "name_entry":
         set_driver(user_id, name=text, state="vehicle_selection")
         vehicles = get_all_vehicles()
@@ -725,14 +692,652 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("الرجاء اختيار المركبة من القائمة:", reply_markup=vehicle_inline_keyboard(vehicles, "selv_"))
         return
 
-    # Main keyboard buttons (identical to previous version, just calling correct functions)
-    # ... (full implementation in final file)
+    # Main keyboard
+    if text == "📝 تقديم شكوى":
+        await update.message.reply_text("أرسل وصف المشكلة (نص، صورة، فيديو، أو صوت).", reply_markup=MAIN_KEYBOARD)
+        context.user_data["expecting_reclamation"] = True
+        return
+
+    if text == "✅ طلب التحقق من الإصلاح":
+        problems = get_driver_problems(user_id, status_filter="قيد التصليح")
+        if not problems:
+            await update.message.reply_text("لا توجد مشاكل بحاجة للتحقق من إصلاحها.", reply_markup=MAIN_KEYBOARD)
+            return
+        pending = [p for p in problems if p["validation_requester"] == 0]
+        if not pending:
+            await update.message.reply_text("جميع المشاكل قيد التحقق بالفعل.", reply_markup=MAIN_KEYBOARD)
+            return
+        buttons = [InlineKeyboardButton(f"مشكلة #{p['id']} - {p['problem_text'][:30]}...", callback_data=f"valreq_{p['id']}") for p in pending]
+        await update.message.reply_text("اختر المشكلة التي تم إصلاحها:", reply_markup=InlineKeyboardMarkup([buttons[i:i+2] for i in range(0, len(buttons), 2)]))
+        return
+
+    if text == "🚗 إدخال عدد الكيلومترات":
+        if not driver or not driver["vehicle"]:
+            await update.message.reply_text("يجب إكمال الملف أولاً.")
+            return
+        await update.message.reply_text(f"أرسل عدد الكيلومترات الحالي للمركبة {driver['vehicle']}:", reply_markup=MAIN_KEYBOARD)
+        context.user_data["expecting_km"] = True
+        return
+
+    if text == "⚙️ الإعدادات":
+        markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🚘 تغيير المركبة", callback_data="settings_change_veh")],
+            [InlineKeyboardButton("📜 سجل شكاويي", callback_data="settings_history")],
+            [InlineKeyboardButton("✏️ تعديل الاسم", callback_data="settings_change_name")],
+            [InlineKeyboardButton("❓ مساعدة", callback_data="settings_help")]
+        ])
+        await update.message.reply_text("اختر الإعداد المطلوب:", reply_markup=markup)
+        return
+
+    # Reclamation text
+    if context.user_data.get("expecting_reclamation"):
+        if not text:
+            await update.message.reply_text("الرجاء كتابة وصف للمشكلة. لا يمكن إرسال شكوى فارغة.", reply_markup=MAIN_KEYBOARD)
+            return
+        context.user_data.pop("expecting_reclamation")
+        if not driver or not driver["name"] or not driver["vehicle"]:
+            await update.message.reply_text("ملفك غير مكتمل.")
+            return
+        status_line = "🔴 الحالة: قيد الانتظار"
+        report = f"السائق: {driver['name']}\nالمركبة: {driver['vehicle']}\nالمشكلة: {text}\n{status_line}"
+        msg = await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_RECLAMATIONS, text=report,
+                                             reply_markup=build_problem_keyboard(0, initial=True))
+        problem_id = add_problem(user_id, driver["name"], driver["vehicle"], text, "", group_msg_id=msg.message_id)
+        await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id, initial=True))
+        await update.message.reply_text("تم إرسال الشكوى.", reply_markup=MAIN_KEYBOARD)
+        return
+
+    # KM input
+    if context.user_data.get("expecting_km"):
+        if not text.isdigit():
+            await update.message.reply_text("يجب إرسال رقم.")
+            return
+        km = int(text)
+        vehicle = driver["vehicle"] if driver else None
+        if not vehicle:
+            await update.message.reply_text("ملف غير مكتمل.")
+            return
+        last_km = get_latest_km(vehicle)
+        if last_km is not None and km <= last_km:
+            await update.message.reply_text(f"⚠️ الكيلومتر يجب أن يكون أكبر من آخر قراءة ({last_km} كم). أعد إدخال القيمة الصحيحة.")
+            return
+        context.user_data.pop("expecting_km")
+        add_km_reading(vehicle, km, driver_name=driver["name"])
+        last_vid = get_last_vidange_km(vehicle)
+        if last_vid > 0 and km >= last_vid + 9000 and not has_active_vidange(vehicle):
+            vidange_problem_id = add_problem(user_id, f"{driver['name']} (نظام)", vehicle, f"Vidange {vehicle}", "نظام")
+            await context.bot.send_message(
+                chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_VIDANGE,
+                text=f"⚠️ تنبيه فيدانج: المركبة {vehicle}\nالعداد الحالي: {km} كم\nآخر فيدانج: {last_vid} كم\n🔴 الحالة: قيد الانتظار",
+                reply_markup=build_problem_keyboard(vidange_problem_id, initial=True)
+            )
+        await update.message.reply_text(f"تم تسجيل العداد: {km} كم.", reply_markup=MAIN_KEYBOARD)
+        return
+
+    await update.message.reply_text("استخدم الأزرار أدناه.", reply_markup=MAIN_KEYBOARD)
+
+async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    driver = get_driver(user_id)
+    if not driver or not driver["name"] or not driver["vehicle"] or driver.get("approval_status") != "approved":
+        await update.message.reply_text("ملفك غير مكتمل.")
+        return
+    caption = update.message.caption or "(مرفق وسائط)"
+    header = f"السائق: {driver['name']}\nالمركبة: {driver['vehicle']}\nالمشكلة: {caption}\n🔴 الحالة: قيد الانتظار"
+    if update.message.photo:
+        file_id = update.message.photo[-1].file_id
+        media_type = "صورة"
+        msg = await context.bot.send_photo(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_RECLAMATIONS, photo=file_id,
+                                           caption=header, reply_markup=build_problem_keyboard(0, initial=True))
+        problem_id = add_problem(user_id, driver["name"], driver["vehicle"], caption, media_type, group_msg_id=msg.message_id)
+        await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id, initial=True))
+    elif update.message.video:
+        file_id = update.message.video.file_id
+        media_type = "فيديو"
+        msg = await context.bot.send_video(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_RECLAMATIONS, video=file_id,
+                                           caption=header, reply_markup=build_problem_keyboard(0, initial=True))
+        problem_id = add_problem(user_id, driver["name"], driver["vehicle"], caption, media_type, group_msg_id=msg.message_id)
+        await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id, initial=True))
+    elif update.message.voice:
+        file_id = update.message.voice.file_id
+        media_type = "صوت"
+        msg = await context.bot.send_voice(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_RECLAMATIONS, voice=file_id,
+                                           caption=header, reply_markup=build_problem_keyboard(0, initial=True))
+        problem_id = add_problem(user_id, driver["name"], driver["vehicle"], caption, media_type, group_msg_id=msg.message_id)
+        await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id, initial=True))
+    await update.message.reply_text("تم إرسال الشكوى.", reply_markup=MAIN_KEYBOARD)
 
 # ----------------------------------------------------------------------
-# The complete code would continue with all handlers for media, callbacks, admin submenus, etc.
-# Due to length, I'll provide the full file in a final message after you confirm the move to Supabase.
+# Callbacks
 # ----------------------------------------------------------------------
+async def vehicle_selection_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    vehicle = query.data.split("_", 1)[1]
+    user_id = query.from_user.id
+    context.user_data["confirm_vehicle"] = vehicle
+    await query.edit_message_text(f"هل تريد تعيين المركبة {vehicle}؟", reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("نعم", callback_data=f"confirmveh_{vehicle}"),
+         InlineKeyboardButton("إلغاء", callback_data="cancel_veh")]
+    ]))
 
+async def confirm_vehicle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    vehicle = query.data.split("_", 1)[1]
+    user_id = query.from_user.id
+    set_driver(user_id, vehicle=vehicle, state="idle")
+    await query.edit_message_text(f"تم تعيين المركبة إلى {vehicle}.")
+    await context.bot.send_message(chat_id=user_id, text="يمكنك الآن استخدام الأزرار أدناه:", reply_markup=MAIN_KEYBOARD)
+
+async def cancel_vehicle_selection_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    vehicles = get_all_vehicles()
+    await query.edit_message_text("اختر مركبتك:", reply_markup=vehicle_inline_keyboard(vehicles, "selv_"))
+
+async def valide_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    problem_id = int(query.data.split("_")[1])
+    problem = get_problem(problem_id)
+    if not problem: return await query.answer("المشكلة غير موجودة.")
+    new_status = "قيد التصليح" if problem["status"] == "قيد الانتظار" else "قيد الانتظار"
+    update_problem_status(problem_id, status=new_status)
+    # Edit message status line
+    if problem["group_message_id"]:
+        try:
+            new_text = update_status_line(problem, new_status, problem["ruglee"])
+            await context.bot.edit_message_text(chat_id=ADMIN_GROUP_ID, message_id=problem["group_message_id"], text=new_text)
+        except: pass
+    await query.edit_message_reply_markup(reply_markup=build_problem_keyboard(problem_id))
+
+def update_status_line(problem: dict, new_status: str = None, new_ruglee: str = None) -> str:
+    # Reconstruct message with updated status line
+    # We need original text; store it somewhere? Simplification: we can store original text in bot_data?
+    # For simplicity, we'll extract the first lines (driver, vehicle, problem) and append new status.
+    # Since the message originally contains "السائق: ...", we can split at "الحالة:" and replace.
+    # We'll assume the message always has "الحالة:" line.
+    # In the creation we included status line, so we can replace it.
+    if not problem.get("group_message_id"):
+        return ""
+    # Fetch original? Not possible. We'll keep a mapping in bot_data: problem_id -> original_text_lines.
+    # For now, a simple approach: get the problem details and rebuild.
+    dname = problem["driver_name"]
+    veh = problem["vehicle"]
+    prob_text = problem["problem_text"]
+    # Build new message
+    status_line = f"الحالة: {status_icon_and_text({'status': new_status or problem['status'], 'ruglee': new_ruglee or problem['ruglee']})}"
+    return f"السائق: {dname}\nالمركبة: {veh}\nالمشكلة: {prob_text}\n{status_line}"
+
+async def ruglee_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.from_user.id not in ADMIN_IDS:
+        await query.answer("⛔ غير مصرح.", show_alert=True); return
+    problem_id = int(query.data.split("_")[1])
+    problem = get_problem(problem_id)
+    if not problem: return await query.answer("غير موجود.")
+    if problem["media_type"] and not problem["comments"]:
+        await query.answer("يجب إضافة تعليق أولاً قبل تأكيد الإصلاح.", show_alert=True)
+        await context.bot.send_message(chat_id=query.from_user.id, text="يجب إضافة تعليق للمشكلة قبل وضعها كمُصلحة. أرسل التعليق هنا.")
+        context.user_data["awaiting_comment"] = problem_id
+        return
+    new_ruglee = "تم الإصلاح" if problem["ruglee"] == "غير مُصلح" else "غير مُصلح"
+    update_problem_status(problem_id, ruglee=new_ruglee)
+    if problem["group_message_id"]:
+        try:
+            new_text = update_status_line(problem, ruglee=new_ruglee)
+            await context.bot.edit_message_text(chat_id=ADMIN_GROUP_ID, message_id=problem["group_message_id"], text=new_text)
+        except: pass
+    await query.edit_message_reply_markup(reply_markup=build_problem_keyboard(problem_id))
+    if problem["media_type"] == "نظام" and new_ruglee == "تم الإصلاح":
+        req_id = problem.get("validation_requester") or problem.get("user_id")
+        if req_id:
+            try:
+                await context.bot.send_message(chat_id=req_id, text=f"تم تأكيد إصلاح الفيدانج للمركبة {problem['vehicle']}. الرجاء إدخال الكيلومترات الحالية:")
+                context.bot_data.setdefault("km_await", {})[req_id] = problem["vehicle"]
+            except: pass
+
+async def fix_comment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("يجب إضافة تعليق أولاً.", show_alert=True)
+    problem_id = int(query.data.split("_")[2])
+    await context.bot.send_message(chat_id=query.from_user.id, text=f"يجب إضافة تعليق على المشكلة #{problem_id} أولاً.")
+    context.user_data["awaiting_comment"] = problem_id
+
+async def comment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    problem_id = int(query.data.split("_")[1])
+    context.user_data["awaiting_comment"] = problem_id
+    await context.bot.send_message(chat_id=query.from_user.id, text="📝 أرسل تعليقك على المشكلة:")
+    await query.answer("أرسل التعليق في المحادثة الخاصة.", show_alert=True)
+
+async def delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.from_user.id not in ADMIN_IDS:
+        await query.answer("⛔ غير مصرح.", show_alert=True); return
+    problem_id = int(query.data.split("_")[1])
+    await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("نعم", callback_data=f"confirmdel_{problem_id}"),
+         InlineKeyboardButton("إلغاء", callback_data=f"cancel_{problem_id}")]
+    ]))
+
+async def confirm_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.from_user.id not in ADMIN_IDS: return
+    problem_id = int(query.data.split("_")[1])
+    delete_problem(problem_id)
+    await query.edit_message_text("🗑️ تم حذف المشكلة.")
+
+async def cancel_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    problem_id = int(query.data.split("_")[1])
+    # Restore previous buttons
+    await query.edit_message_reply_markup(reply_markup=build_problem_keyboard(problem_id))
+
+async def validation_request_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    problem_id = int(query.data.split("_")[1])
+    problem = get_problem(problem_id)
+    if not problem: return await query.answer("غير موجود.")
+    if problem["validation_requester"] != 0:
+        await query.answer("تم إرسال طلب تحقق سابقاً.", show_alert=True)
+        return
+    update_problem_status(problem_id, validation_requester=query.from_user.id)
+    driver = get_driver(query.from_user.id)
+    driver_name = driver["name"] if driver else "Unknown"
+    msg_text = f"📌 طلب تحقق من الإصلاح:\nالمشكلة #{problem_id} - {problem['problem_text']}\nالمركبة: {problem['vehicle']}\nالسائق: {driver_name}\nالحالة: 📌 في انتظار التحقق"
+    sent_msg = await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_VALIDATION, text=msg_text,
+                                              reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ تم الإصلاح", callback_data=f"rug_{problem_id}")]]))
+    # Update problem with validation message id? not needed.
+    await query.edit_message_text("تم إرسال طلب التحقق.")
+
+# Vidange confirm / modify
+async def vidange_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.from_user.id not in ADMIN_IDS:
+        await query.answer("⛔ غير مصرح.", show_alert=True); return
+    data = query.data.split("_")
+    user_id = int(data[1])
+    km = int(data[2])
+    pending = context.bot_data.get("pending_vidange", {})
+    info = pending.pop(query.message.message_id, None)
+    if not info:
+        await query.answer("انتهت صلاحية الطلب.", show_alert=True)
+        return
+    vehicle = info["vehicle"]
+    add_km_reading(vehicle, km, driver_name=info.get("driver_name", ""))
+    set_last_vidange_km(vehicle, km)
+    await query.edit_message_text(f"✅ تم تأكيد الفيدانج للمركبة {vehicle} بقيمة {km} كم.")
+    try:
+        await context.bot.send_message(chat_id=user_id, text=f"✅ تم اعتماد تحديث الفيدانج للمركبة {vehicle}: {km} كم.")
+    except: pass
+
+async def vidange_modify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.from_user.id not in ADMIN_IDS:
+        await query.answer("⛔ غير مصرح.", show_alert=True); return
+    data = query.data.split("_")
+    user_id = int(data[1])
+    pending = context.bot_data.get("pending_vidange", {})
+    info = pending.get(query.message.message_id)
+    if not info:
+        await query.answer("انتهت صلاحية الطلب.", show_alert=True)
+        return
+    context.user_data["vidange_modify"] = {
+        "user_id": user_id,
+        "vehicle": info["vehicle"],
+        "message_id": query.message.message_id
+    }
+    await query.edit_message_text("✏️ أرسل القيمة الصحيحة للكيلومتر بعد الفيدانج:")
+
+# ----------------------------------------------------------------------
+# Approval / Rejection callbacks
+# ----------------------------------------------------------------------
+async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.from_user.id not in ADMIN_IDS: return
+    user_id = int(query.data.split("_")[1])
+    add_allowed_user(user_id)
+    set_driver(user_id, approval_status="approved", state="vehicle_selection")
+    # Update approval message
+    try:
+        await query.edit_message_text(f"✅ تم قبول المستخدم {user_id}")
+    except: pass
+    # Notify driver
+    try:
+        await context.bot.send_message(chat_id=user_id, text="تم قبولك. يمكنك الآن اختيار مركبتك:")
+        vehicles = get_all_vehicles()
+        await context.bot.send_message(chat_id=user_id, text="اختر مركبتك:", reply_markup=vehicle_inline_keyboard(vehicles, "selv_"))
+    except: pass
+
+async def reject_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.from_user.id not in ADMIN_IDS: return
+    user_id = int(query.data.split("_")[1])
+    set_driver(user_id, approval_status="rejected")
+    add_allowed_user(user_id, status="rejected")
+    try:
+        await query.edit_message_text(f"❌ تم رفض المستخدم {user_id}")
+    except: pass
+    try:
+        await context.bot.send_message(chat_id=user_id, text="عذراً، لم يتم قبولك. يمكنك التواصل مع الإدارة.")
+    except: pass
+
+# ----------------------------------------------------------------------
+# Admin submenu callbacks
+# ----------------------------------------------------------------------
+async def admin_main_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("🕹️ لوحة التحكم:", reply_markup=admin_main_keyboard())
+
+async def admin_vehicles_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("🚘 تعديل المركبات:", reply_markup=admin_vehicles_keyboard())
+
+async def admin_drivers_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("👤 إدارة السائقين:", reply_markup=admin_drivers_keyboard())
+
+async def admin_vidange_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("🛢️ إدارة الفيدانج:", reply_markup=admin_vidange_menu_keyboard())
+
+async def admin_export_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("📋 تصدير Excel:", reply_markup=admin_export_menu_keyboard())
+
+async def admin_approve_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    # Show drivers with pending status
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("SELECT user_id, name FROM drivers WHERE approval_status='pending'")
+    pending = cur.fetchall()
+    cur.close()
+    conn.close()
+    if not pending:
+        await query.edit_message_text("لا يوجد سائقون بانتظار القبول.")
+        return
+    buttons = [InlineKeyboardButton(f"{d['name']} ({d['user_id']})", callback_data=f"approve_{d['user_id']}") for d in pending]
+    await query.edit_message_text("اختر سائقًا لقبوله:", reply_markup=InlineKeyboardMarkup([buttons[i:i+2] for i in range(0, len(buttons), 2)]))
+
+async def admin_remove_driver_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    drivers = get_all_drivers()
+    if not drivers:
+        await query.edit_message_text("لا يوجد سائقون مسجلون.")
+        return
+    buttons = [InlineKeyboardButton(f"{d['name']} ({d['user_id']})", callback_data=f"rmdriver_{d['user_id']}") for d in drivers]
+    await query.edit_message_text("اختر سائقًا لحذفه:", reply_markup=InlineKeyboardMarkup([buttons[i:i+2] for i in range(0, len(buttons), 2)]))
+
+async def confirm_remove_driver(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = int(query.data.split("_")[1])
+    # Confirmation step
+    await query.edit_message_text(f"هل أنت متأكد من حذف السائق {user_id}؟", reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("نعم", callback_data=f"confirmrm_{user_id}"),
+         InlineKeyboardButton("إلغاء", callback_data="admin_drivers")]
+    ]))
+
+async def confirm_remove_driver_exec(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.from_user.id not in ADMIN_IDS: return
+    user_id = int(query.data.split("_")[1])
+    remove_driver(user_id)
+    await query.edit_message_text(f"✅ تم حذف السائق {user_id}.")
+    # Notify driver
+    try:
+        await context.bot.send_message(chat_id=user_id, text="تم إلغاء صلاحيتك لاستخدام البوت.")
+    except: pass
+
+# ----------------------------------------------------------------------
+# Admin input handler (including vehicle add/remove, set vidange, urgent vidange, and vidange modify)
+# ----------------------------------------------------------------------
+async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS: return
+    text = update.message.text.strip()
+    # vidange modify input
+    if context.user_data.get("vidange_modify"):
+        info = context.user_data.pop("vidange_modify")
+        if not text.isdigit():
+            await update.message.reply_text("يجب أن يكون الكيلومتر رقماً. حاول مرة أخرى:")
+            context.user_data["vidange_modify"] = info
+            return
+        km = int(text)
+        vehicle = info["vehicle"]
+        last_km = get_latest_km(vehicle)
+        if last_km is not None and km <= last_km:
+            await update.message.reply_text(f"⚠️ الكيلومتر يجب أن يكون أكبر من آخر قراءة ({last_km} كم). أعد الإدخال.")
+            context.user_data["vidange_modify"] = info
+            return
+        add_km_reading(vehicle, km, driver_name="مشرف")
+        set_last_vidange_km(vehicle, km)
+        try:
+            await context.bot.edit_message_text(
+                chat_id=ADMIN_GROUP_ID,
+                message_id=info["message_id"],
+                text=f"✅ تم تعديل الفيدانج للمركبة {vehicle} إلى {km} كم."
+            )
+        except: pass
+        try:
+            await context.bot.send_message(chat_id=info["user_id"], text=f"✅ تم تحديث الفيدانج للمركبة {vehicle} بقيمة {km} كم (بعد المراجعة).")
+        except: pass
+        await update.message.reply_text(f"✅ تم تحديث الفيدانج لـ {vehicle} = {km} كم.")
+        return
+
+    # urgent vidange input
+    if context.user_data.get("admin_urgentvid"):
+        context.user_data.pop("admin_urgentvid")
+        parts = text.split()
+        if len(parts) != 2 or not parts[1].isdigit():
+            await update.message.reply_text("صيغة خاطئة. استخدم: CODE KM")
+            return
+        code = parts[0].upper()
+        km = int(parts[1])
+        if code not in get_all_vehicles():
+            await update.message.reply_text("المركبة غير موجودة.")
+            return
+        set_last_vidange_km(code, km)
+        latest = get_latest_km(code)
+        if latest is not None and latest >= km + 9000:
+            vidange_problem_id = add_problem(0, "نظام (عاجل)", code, f"Vidange عاجل {code}", "نظام")
+            await context.bot.send_message(
+                chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_VIDANGE,
+                text=f"🚨 فيدانج عاجل: المركبة {code}\nالعداد الحالي: {latest} كم\nآخر فيدانج (محدث): {km} كم\n🔴 الحالة: قيد الانتظار",
+                reply_markup=build_problem_keyboard(vidange_problem_id, initial=True)
+            )
+        await update.message.reply_text(f"✅ تم تعيين آخر فيدانج عاجل للمركبة {code} = {km} كم.")
+        return
+
+    # add/remove vehicle inputs
+    if context.user_data.get("admin_add_veh"):
+        context.user_data.pop("admin_add_veh")
+        add_vehicle(text.upper())
+        await update.message.reply_text(f"✅ تمت إضافة {text.upper()}.")
+    elif context.user_data.get("admin_rem_veh"):
+        context.user_data.pop("admin_rem_veh")
+        remove_vehicle(text.upper())
+        await update.message.reply_text(f"🗑️ تم حذف {text.upper()}.")
+    elif context.user_data.get("admin_setvid"):
+        context.user_data.pop("admin_setvid")
+        parts = text.split()
+        if len(parts) != 2 or not parts[1].isdigit():
+            await update.message.reply_text("صيغة خاطئة. استخدم: CODE KM")
+            return
+        code = parts[0].upper()
+        km = int(parts[1])
+        if code not in get_all_vehicles():
+            await update.message.reply_text("المركبة غير موجودة.")
+            return
+        set_last_vidange_km(code, km)
+        await update.message.reply_text(f"✅ تم تعيين آخر فيدانج لـ {code} = {km} كم.")
+
+# ----------------------------------------------------------------------
+# Settings callbacks (help, history, change name with cancel)
+# ----------------------------------------------------------------------
+async def settings_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    videos = get_all_help_videos()
+    if not videos:
+        await query.edit_message_text("لا يوجد فيديو تعليمي حالياً.")
+        return
+    for v in videos:
+        try:
+            await context.bot.send_video(chat_id=query.from_user.id, video=v["file_id"], caption=v.get("description"))
+        except: pass
+    await query.edit_message_text("تم إرسال الفيديوهات التعليمية.")
+
+async def settings_history_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    problems = get_driver_problems(user_id)
+    if not problems:
+        await query.edit_message_text("لا توجد شكاوي مسجلة.")
+        return
+    text = "📜 سجل شكاويي:\n"
+    for p in problems[:10]:
+        text += f"#{p['id']} | {p['date']} | {p['problem_text'][:30]} | {status_icon_and_text(p)}\n"
+    await query.edit_message_text(text)
+
+async def settings_change_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    set_driver(query.from_user.id, state="name_entry")
+    # Send cancel button
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_name")]])
+    await query.edit_message_text("أرسل اسمك الجديد:", reply_markup=markup)
+
+async def cancel_name_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    # Reset to idle without changing name
+    set_driver(query.from_user.id, state="idle")
+    await query.edit_message_text("تم إلغاء تغيير الاسم.")
+
+# ----------------------------------------------------------------------
+# Help video commands (/sethelp, /removehelp)
+# ----------------------------------------------------------------------
+async def set_help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    # Check if the message contains a video (reply or forward)
+    if not update.message.video and not update.message.reply_to_message:
+        await update.message.reply_text("أرسل الفيديو (كملف فيديو) أو رد على فيديو.")
+        return
+    if update.message.reply_to_message and update.message.reply_to_message.video:
+        file_id = update.message.reply_to_message.video.file_id
+        desc = update.message.text or ""
+        add_help_video(file_id, desc)
+        await update.message.reply_text("تم حفظ الفيديو بنجاح.")
+    elif update.message.video:
+        file_id = update.message.video.file_id
+        # If there's a caption, use it as description
+        desc = update.message.caption or ""
+        add_help_video(file_id, desc)
+        await update.message.reply_text("تم حفظ الفيديو بنجاح.")
+    else:
+        await update.message.reply_text("الرجاء إرسال فيديو أو الرد على فيديو.")
+
+async def remove_help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    videos = get_all_help_videos()
+    if not videos:
+        await update.message.reply_text("لا توجد فيديوهات للحذف.")
+        return
+    buttons = []
+    for v in videos:
+        desc = v["description"] or f"فيديو {v['id']}"
+        buttons.append([InlineKeyboardButton(f"🗑️ {desc}", callback_data=f"delhelp_{v['id']}")])
+    await update.message.reply_text("اختر فيديو للحذف:", reply_markup=InlineKeyboardMarkup(buttons))
+
+async def delete_help_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.from_user.id not in ADMIN_IDS: return
+    video_id = int(query.data.split("_")[1])
+    delete_help_video(video_id)
+    await query.edit_message_text("✅ تم حذف الفيديو.")
+
+# ----------------------------------------------------------------------
+# Broadcast command (super admin only)
+# ----------------------------------------------------------------------
+async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    if not context.args:
+        await update.message.reply_text("استخدم: /broadcast <النص>")
+        return
+    message = " ".join(context.args)
+    drivers = get_all_drivers()
+    count = 0
+    for d in drivers:
+        try:
+            await context.bot.send_message(chat_id=d["user_id"], text=message)
+            count += 1
+        except: pass
+    await update.message.reply_text(f"تم إرسال الرسالة إلى {count} سائق.")
+
+# ----------------------------------------------------------------------
+# Dashboard command and scheduled jobs (unchanged, but using Webhook)
+# ----------------------------------------------------------------------
+async def _send_dashboard_to_group(context: ContextTypes.DEFAULT_TYPE):
+    vehicles = get_all_vehicles()
+    if not vehicles: return
+    buttons = [InlineKeyboardButton(dashboard_button_text(v), callback_data=f"hist_{v}") for v in vehicles]
+    markup = InlineKeyboardMarkup([buttons[i:i+2] for i in range(0, len(buttons), 2)])
+    try:
+        await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_GENERAL,
+            text="📊 الحالة اليومية للمركبات:", reply_markup=markup)
+    except Exception as e:
+        logging.warning(f"Dashboard error: {e}")
+
+async def send_dashboard(context: ContextTypes.DEFAULT_TYPE):
+    await _send_dashboard_to_group(context)
+
+async def weekly_excel(context: ContextTypes.DEFAULT_TYPE):
+    file = generate_problems_excel()
+    try:
+        await context.bot.send_document(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_GENERAL, document=file, filename="المشاكل_الأسبوعي.xlsx")
+    except: pass
+
+def schedule_jobs(app: Application):
+    now = datetime.now(TZ)
+    target = time(7, 30, 0)
+    next_daily = datetime.combine(now.date(), target, tzinfo=TZ)
+    if now >= next_daily: next_daily += timedelta(days=1)
+    app.job_queue.run_repeating(send_dashboard, interval=24*60*60, first=next_daily)
+    days_until_sat = (5 - now.weekday()) % 7
+    next_sat = datetime.combine(now.date() + timedelta(days=days_until_sat), target, tzinfo=TZ)
+    if now >= next_sat: next_sat += timedelta(days=7)
+    app.job_queue.run_repeating(weekly_excel, interval=7*24*60*60, first=next_sat)
+
+# ----------------------------------------------------------------------
+# Main entry
+# ----------------------------------------------------------------------
 def main():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -742,9 +1347,67 @@ def main():
     global app
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Register all handlers (final version will include all)
-    # ...
+    # Command handlers
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("admin", admin_main_callback))
+    app.add_handler(CommandHandler("panel", admin_main_callback))
+    app.add_handler(CommandHandler("sethelp", set_help_cmd))
+    app.add_handler(CommandHandler("removehelp", remove_help_cmd))
+    app.add_handler(CommandHandler("broadcast", broadcast_cmd))
+    app.add_handler(CommandHandler("dashboard", send_dashboard))
+    app.add_handler(CommandHandler("export", lambda u,c: export_problems(u,c)))
+    app.add_handler(CommandHandler("export_vidange", lambda u,c: export_vidange(u,c)))
+    app.add_handler(CommandHandler("vidange", lambda u,c: export_vidange_vehicle(u,c)))
 
+    # Text / Media handlers
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_input_handler), group=1)
+    app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.VOICE, handle_media))
+
+    # Callback handlers
+    app.add_handler(CallbackQueryHandler(vehicle_selection_callback, pattern="^selv_"))
+    app.add_handler(CallbackQueryHandler(confirm_vehicle_callback, pattern="^confirmveh_"))
+    app.add_handler(CallbackQueryHandler(cancel_vehicle_selection_callback, pattern="^cancel_veh$"))
+    app.add_handler(CallbackQueryHandler(valide_callback, pattern="^val_"))
+    app.add_handler(CallbackQueryHandler(ruglee_callback, pattern="^rug_"))
+    app.add_handler(CallbackQueryHandler(fix_comment_callback, pattern="^fix_comment_"))
+    app.add_handler(CallbackQueryHandler(comment_callback, pattern="^com_"))
+    app.add_handler(CallbackQueryHandler(delete_callback, pattern="^del_"))
+    app.add_handler(CallbackQueryHandler(confirm_delete_callback, pattern="^confirmdel_"))
+    app.add_handler(CallbackQueryHandler(cancel_delete_callback, pattern="^cancel_"))
+    app.add_handler(CallbackQueryHandler(validation_request_callback, pattern="^valreq_"))
+    app.add_handler(CallbackQueryHandler(vidange_confirm_callback, pattern="^vidconfirm_"))
+    app.add_handler(CallbackQueryHandler(vidange_modify_callback, pattern="^vidmodify_"))
+    app.add_handler(CallbackQueryHandler(approve_callback, pattern="^approve_"))
+    app.add_handler(CallbackQueryHandler(reject_callback, pattern="^reject_"))
+    app.add_handler(CallbackQueryHandler(admin_main_callback, pattern="^admin_main$"))
+    app.add_handler(CallbackQueryHandler(admin_vehicles_menu, pattern="^admin_vehicles$"))
+    app.add_handler(CallbackQueryHandler(admin_drivers_menu, pattern="^admin_drivers$"))
+    app.add_handler(CallbackQueryHandler(admin_vidange_menu, pattern="^admin_vidange_menu$"))
+    app.add_handler(CallbackQueryHandler(admin_export_menu, pattern="^admin_export_menu$"))
+    app.add_handler(CallbackQueryHandler(admin_approve_list, pattern="^admin_approve_list$"))
+    app.add_handler(CallbackQueryHandler(admin_remove_driver_list, pattern="^admin_remove_driver_list$"))
+    app.add_handler(CallbackQueryHandler(confirm_remove_driver, pattern="^rmdriver_"))
+    app.add_handler(CallbackQueryHandler(confirm_remove_driver_exec, pattern="^confirmrm_"))
+    app.add_handler(CallbackQueryHandler(settings_help, pattern="^settings_help$"))
+    app.add_handler(CallbackQueryHandler(settings_history_callback, pattern="^settings_history$"))
+    app.add_handler(CallbackQueryHandler(settings_change_name, pattern="^settings_change_name$"))
+    app.add_handler(CallbackQueryHandler(cancel_name_callback, pattern="^cancel_name$"))
+    app.add_handler(CallbackQueryHandler(delete_help_video_callback, pattern="^delhelp_"))
+
+    # admin submenu actions
+    app.add_handler(CallbackQueryHandler(admin_addveh, pattern="^admin_addveh$"))
+    app.add_handler(CallbackQueryHandler(admin_remveh, pattern="^admin_remveh$"))
+    app.add_handler(CallbackQueryHandler(admin_setvid, pattern="^admin_setvid$"))
+    app.add_handler(CallbackQueryHandler(admin_urgentvid, pattern="^admin_urgentvid$"))
+    app.add_handler(CallbackQueryHandler(admin_dash, pattern="^admin_dash$"))
+    app.add_handler(CallbackQueryHandler(admin_export, pattern="^admin_export$"))
+    app.add_handler(CallbackQueryHandler(admin_vid, pattern="^admin_vid$"))
+    app.add_handler(CallbackQueryHandler(admin_listveh, pattern="^admin_listveh$"))
+
+    schedule_jobs(app)
+
+    # Webhook setup
     loop.run_until_complete(set_webhook(app))
     port = int(os.environ.get("PORT", 5000))
     web_app.run(host="0.0.0.0", port=port)
