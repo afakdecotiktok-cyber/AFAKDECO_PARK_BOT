@@ -128,7 +128,7 @@ def init_db():
     conn.close()
 
 # ----------------------------------------------------------------------
-# Database functions (all previously defined, unchanged)
+# Database functions (all previously defined)
 # ----------------------------------------------------------------------
 def get_driver(user_id: int) -> dict | None:
     conn = get_conn()
@@ -814,7 +814,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("تم إرسال الشكوى.", reply_markup=MAIN_KEYBOARD)
 
 # ----------------------------------------------------------------------
-# Callback handlers (all existing ones unchanged)
+# Callback handlers
 # ----------------------------------------------------------------------
 async def vehicle_selection_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1328,7 +1328,7 @@ async def export_vidange_vehicle(update: Update, context: ContextTypes.DEFAULT_T
     await update.message.reply_document(document=file, filename=f"فيدانج_{code}.xlsx")
 
 # ----------------------------------------------------------------------
-# Admin action callbacks (addveh, remveh, setvid, urgentvid, dash, export, vid, listveh, history)
+# Admin action callbacks (addveh, remveh, etc.)
 # ----------------------------------------------------------------------
 async def admin_addveh(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1415,6 +1415,28 @@ async def vehicle_history_callback(update: Update, context: ContextTypes.DEFAULT
     await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_HISTORY, text=text)
 
 # ----------------------------------------------------------------------
+# New command handlers for /admin and /panel
+# ----------------------------------------------------------------------
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /admin command – send the main admin panel."""
+    await update.message.reply_text("🕹️ لوحة التحكم:", reply_markup=admin_main_keyboard())
+
+async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /panel command – send topic-specific panel if in a topic."""
+    thread_id = update.message.message_thread_id if update.message else None
+    keyboard = get_topic_keyboard(thread_id) if thread_id else None
+    if keyboard:
+        await update.message.reply_text("🕹️ لوحة التحكم الخاصة بهذا القسم:", reply_markup=keyboard)
+    else:
+        await update.message.reply_text("🕹️ لوحة التحكم الكاملة:", reply_markup=admin_main_keyboard())
+
+# ----------------------------------------------------------------------
+# Error handler
+# ----------------------------------------------------------------------
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logging.error(msg="Exception while handling an update:", exc_info=context.error)
+
+# ----------------------------------------------------------------------
 # Webhook and aiohttp
 # ----------------------------------------------------------------------
 async def health(request):
@@ -1439,8 +1461,8 @@ async def main():
 
     # Command handlers
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("admin", admin_main_callback))
-    app.add_handler(CommandHandler("panel", admin_main_callback))
+    app.add_handler(CommandHandler("admin", admin_command))          # FIX: separate function
+    app.add_handler(CommandHandler("panel", panel_command))          # FIX: separate function
     app.add_handler(CommandHandler("sethelp", set_help_cmd))
     app.add_handler(CommandHandler("removehelp", remove_help_cmd))
     app.add_handler(CommandHandler("broadcast", broadcast_cmd))
@@ -1454,7 +1476,7 @@ async def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_input_handler), group=1)
     app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.VOICE & filters.ChatType.PRIVATE, handle_media))
 
-    # Callback handlers (unchanged)
+    # Callback handlers
     app.add_handler(CallbackQueryHandler(vehicle_selection_callback, pattern="^selv_"))
     app.add_handler(CallbackQueryHandler(confirm_vehicle_callback, pattern="^confirmveh_"))
     app.add_handler(CallbackQueryHandler(cancel_vehicle_selection_callback, pattern="^cancel_veh$"))
@@ -1493,6 +1515,9 @@ async def main():
     app.add_handler(CallbackQueryHandler(admin_vid, pattern="^admin_vid$"))
     app.add_handler(CallbackQueryHandler(admin_listveh, pattern="^admin_listveh$"))
     app.add_handler(CallbackQueryHandler(vehicle_history_callback, pattern="^hist_"))
+
+    # Error handler
+    app.add_error_handler(error_handler)
 
     schedule_jobs(app)
     await app.initialize()
