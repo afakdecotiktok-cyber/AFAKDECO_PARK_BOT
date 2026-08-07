@@ -1,21 +1,16 @@
-import os, sys, logging, asyncio, threading
+import os, sys, logging, asyncio
 from datetime import datetime, time, timedelta
 from io import BytesIO
 from zoneinfo import ZoneInfo
 
 import psycopg2, psycopg2.extras
-from flask import Flask, request, jsonify
+from aiohttp import web
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
-
-# ----------------------------------------------------------------------
-# Flask app – webhook endpoint
-# ----------------------------------------------------------------------
-web_app = Flask(__name__)
 
 # ----------------------------------------------------------------------
 # Environment variables
@@ -50,11 +45,10 @@ if ADMIN_IDS_STR:
         if uid.isdigit():
             ADMIN_IDS.add(int(uid))
 
-# Algeria timezone
 TZ = ZoneInfo("Africa/Algiers")
 
 # ----------------------------------------------------------------------
-# PostgreSQL helper (Supabase)
+# PostgreSQL helper
 # ----------------------------------------------------------------------
 def get_conn():
     return psycopg2.connect(DATABASE_URL, sslmode='require')
@@ -78,8 +72,7 @@ def init_db():
     ''')
     cur.execute("SELECT COUNT(*) FROM vehicles")
     if cur.fetchone()[0] == 0:
-        default_vehicles = ["F01","F02","H01"] + [f"M{i:02d}" for i in range(1,32)] + ["LOGAN"]
-        for v in default_vehicles:
+        for v in ["F01","F02","H01"] + [f"M{i:02d}" for i in range(1,32)] + ["LOGAN"]:
             cur.execute("INSERT INTO vehicles (code) VALUES (%s) ON CONFLICT DO NOTHING", (v,))
     cur.execute('''
         CREATE TABLE IF NOT EXISTS problems (
@@ -97,7 +90,6 @@ def init_db():
             group_message_id BIGINT DEFAULT 0
         )
     ''')
-    # Safely add columns if they don't exist (no rollback)
     cur.execute("ALTER TABLE problems ADD COLUMN IF NOT EXISTS validation_requester BIGINT DEFAULT 0")
     cur.execute("ALTER TABLE problems ADD COLUMN IF NOT EXISTS group_message_id BIGINT DEFAULT 0")
     cur.execute('''
@@ -136,7 +128,7 @@ def init_db():
     conn.close()
 
 # ----------------------------------------------------------------------
-# Database functions (all previously defined are included, no changes)
+# Database functions (all previously defined)
 # ----------------------------------------------------------------------
 def get_driver(user_id: int) -> dict | None:
     conn = get_conn()
@@ -367,15 +359,6 @@ def delete_help_video(video_id: int):
     cur.close()
     conn.close()
 
-def get_help_video(video_id: int) -> dict | None:
-    conn = get_conn()
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT * FROM help_videos WHERE id=%s", (video_id,))
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
-    return dict(row) if row else None
-
 def add_allowed_user(user_id: int, status: str = "approved"):
     conn = get_conn()
     cur = conn.cursor()
@@ -580,7 +563,7 @@ def status_icon_and_text(problem: dict) -> str:
         return "🟠 قيد التصليح"
     return "⚪ حالة غير معروفة"
 
-def build_problem_keyboard(problem_id: int, initial: bool = False) -> InlineKeyboardMarkup:
+def build_problem_keyboard(problem_id: int) -> InlineKeyboardMarkup:
     if problem_id == 0:
         return InlineKeyboardMarkup([])
     problem = get_problem(problem_id)
@@ -611,25 +594,6 @@ def update_status_line(problem: dict, new_status: str = None, new_ruglee: str = 
     prob_text = problem["problem_text"]
     status_line = f"الحالة: {status_icon_and_text({'status': new_status or problem['status'], 'ruglee': new_ruglee or problem['ruglee']})}"
     return f"السائق: {dname}\nالمركبة: {veh}\nالمشكلة: {prob_text}\n{status_line}"
-
-# ----------------------------------------------------------------------
-# Webhook setup
-# ----------------------------------------------------------------------
-async def set_webhook(app: Application):
-    webhook_url = f"{WEBHOOK_URL}/telegram"
-    await app.bot.set_webhook(url=webhook_url)
-    logging.info(f"Webhook set to {webhook_url}")
-
-@web_app.route('/telegram', methods=['POST'])
-async def telegram_webhook():
-    data = request.get_json()
-    update = Update.de_json(data, app.bot)
-    await app.process_update(update)
-    return jsonify({"status": "ok"})
-
-@web_app.route('/')
-def home():
-    return "Bot is running."
 
 # ----------------------------------------------------------------------
 # Core handlers
@@ -726,7 +690,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         vehicles = get_all_vehicles()
         await update.message.reply_text("تم حفظ الاسم. اختر مركبتك:", reply_markup=vehicle_inline_keyboard(vehicles, "selv_"))
         return
-
     if state == "vehicle_selection":
         vehicles = get_all_vehicles()
         await update.message.reply_text("الرجاء اختيار المركبة من القائمة:", reply_markup=vehicle_inline_keyboard(vehicles, "selv_"))
@@ -737,7 +700,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("أرسل وصف المشكلة (نص، صورة، فيديو، أو صوت).", reply_markup=MAIN_KEYBOARD)
         context.user_data["expecting_reclamation"] = True
         return
-
     if text == "✅ طلب التحقق من الإصلاح":
         problems = get_driver_problems(user_id, status_filter="قيد التصليح")
         if not problems:
@@ -750,7 +712,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buttons = [InlineKeyboardButton(f"مشكلة #{p['id']} - {p['problem_text'][:30]}...", callback_data=f"valreq_{p['id']}") for p in pending]
         await update.message.reply_text("اختر المشكلة التي تم إصلاحها:", reply_markup=InlineKeyboardMarkup([buttons[i:i+2] for i in range(0, len(buttons), 2)]))
         return
-
     if text == "🚗 إدخال عدد الكيلومترات":
         if not driver or not driver["vehicle"]:
             await update.message.reply_text("يجب إكمال الملف أولاً.")
@@ -758,7 +719,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"أرسل عدد الكيلومترات الحالي للمركبة {driver['vehicle']}:", reply_markup=MAIN_KEYBOARD)
         context.user_data["expecting_km"] = True
         return
-
     if text == "⚙️ الإعدادات":
         markup = InlineKeyboardMarkup([
             [InlineKeyboardButton("🚘 تغيير المركبة", callback_data="settings_change_veh")],
@@ -769,7 +729,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("اختر الإعداد المطلوب:", reply_markup=markup)
         return
 
-    # Reclamation text
+    # Reclamation / km input
     if context.user_data.get("expecting_reclamation"):
         if not text:
             await update.message.reply_text("الرجاء كتابة وصف للمشكلة. لا يمكن إرسال شكوى فارغة.", reply_markup=MAIN_KEYBOARD)
@@ -781,13 +741,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status_line = "🔴 الحالة: قيد الانتظار"
         report = f"السائق: {driver['name']}\nالمركبة: {driver['vehicle']}\nالمشكلة: {text}\n{status_line}"
         msg = await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_RECLAMATIONS, text=report,
-                                             reply_markup=build_problem_keyboard(0, initial=True))
+                                             reply_markup=build_problem_keyboard(0))
         problem_id = add_problem(user_id, driver["name"], driver["vehicle"], text, "", group_msg_id=msg.message_id)
-        await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id, initial=True))
+        await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id))
         await update.message.reply_text("تم إرسال الشكوى.", reply_markup=MAIN_KEYBOARD)
         return
-
-    # KM input
     if context.user_data.get("expecting_km"):
         if not text.isdigit():
             await update.message.reply_text("يجب إرسال رقم.")
@@ -809,7 +767,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(
                 chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_VIDANGE,
                 text=f"⚠️ تنبيه فيدانج: المركبة {vehicle}\nالعداد الحالي: {km} كم\nآخر فيدانج: {last_vid} كم\n🔴 الحالة: قيد الانتظار",
-                reply_markup=build_problem_keyboard(vidange_problem_id, initial=True)
+                reply_markup=build_problem_keyboard(vidange_problem_id)
             )
         await update.message.reply_text(f"تم تسجيل العداد: {km} كم.", reply_markup=MAIN_KEYBOARD)
         return
@@ -828,23 +786,23 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_id = update.message.photo[-1].file_id
         media_type = "صورة"
         msg = await context.bot.send_photo(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_RECLAMATIONS, photo=file_id,
-                                           caption=header, reply_markup=build_problem_keyboard(0, initial=True))
+                                           caption=header, reply_markup=build_problem_keyboard(0))
         problem_id = add_problem(user_id, driver["name"], driver["vehicle"], caption, media_type, group_msg_id=msg.message_id)
-        await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id, initial=True))
+        await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id))
     elif update.message.video:
         file_id = update.message.video.file_id
         media_type = "فيديو"
         msg = await context.bot.send_video(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_RECLAMATIONS, video=file_id,
-                                           caption=header, reply_markup=build_problem_keyboard(0, initial=True))
+                                           caption=header, reply_markup=build_problem_keyboard(0))
         problem_id = add_problem(user_id, driver["name"], driver["vehicle"], caption, media_type, group_msg_id=msg.message_id)
-        await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id, initial=True))
+        await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id))
     elif update.message.voice:
         file_id = update.message.voice.file_id
         media_type = "صوت"
         msg = await context.bot.send_voice(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_RECLAMATIONS, voice=file_id,
-                                           caption=header, reply_markup=build_problem_keyboard(0, initial=True))
+                                           caption=header, reply_markup=build_problem_keyboard(0))
         problem_id = add_problem(user_id, driver["name"], driver["vehicle"], caption, media_type, group_msg_id=msg.message_id)
-        await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id, initial=True))
+        await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id))
     await update.message.reply_text("تم إرسال الشكوى.", reply_markup=MAIN_KEYBOARD)
 
 # ----------------------------------------------------------------------
@@ -977,7 +935,6 @@ async def validation_request_callback(update: Update, context: ContextTypes.DEFA
                                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ تم الإصلاح", callback_data=f"rug_{problem_id}")]]))
     await query.edit_message_text("تم إرسال طلب التحقق.")
 
-# Vidange confirm / modify
 async def vidange_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1131,7 +1088,6 @@ async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_id = update.effective_user.id
     if user_id not in ADMIN_IDS: return
     text = update.message.text.strip()
-    # vidange modify input
     if context.user_data.get("vidange_modify"):
         info = context.user_data.pop("vidange_modify")
         if not text.isdigit():
@@ -1159,8 +1115,6 @@ async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         except: pass
         await update.message.reply_text(f"✅ تم تحديث الفيدانج لـ {vehicle} = {km} كم.")
         return
-
-    # urgent vidange input
     if context.user_data.get("admin_urgentvid"):
         context.user_data.pop("admin_urgentvid")
         parts = text.split()
@@ -1179,12 +1133,10 @@ async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             await context.bot.send_message(
                 chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_VIDANGE,
                 text=f"🚨 فيدانج عاجل: المركبة {code}\nالعداد الحالي: {latest} كم\nآخر فيدانج (محدث): {km} كم\n🔴 الحالة: قيد الانتظار",
-                reply_markup=build_problem_keyboard(vidange_problem_id, initial=True)
+                reply_markup=build_problem_keyboard(vidange_problem_id)
             )
         await update.message.reply_text(f"✅ تم تعيين آخر فيدانج عاجل للمركبة {code} = {km} كم.")
         return
-
-    # add/remove vehicle inputs
     if context.user_data.get("admin_add_veh"):
         context.user_data.pop("admin_add_veh")
         add_vehicle(text.upper())
@@ -1250,11 +1202,10 @@ async def cancel_name_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.edit_message_text("تم إلغاء تغيير الاسم.")
 
 # ----------------------------------------------------------------------
-# Help video commands (/sethelp, /removehelp)
+# Help video commands
 # ----------------------------------------------------------------------
 async def set_help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        return
+    if update.effective_user.id not in ADMIN_IDS: return
     if not update.message.video and not update.message.reply_to_message:
         await update.message.reply_text("أرسل الفيديو (كملف فيديو) أو رد على فيديو.")
         return
@@ -1272,8 +1223,7 @@ async def set_help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("الرجاء إرسال فيديو أو الرد على فيديو.")
 
 async def remove_help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        return
+    if update.effective_user.id not in ADMIN_IDS: return
     videos = get_all_help_videos()
     if not videos:
         await update.message.reply_text("لا توجد فيديوهات للحذف.")
@@ -1296,8 +1246,7 @@ async def delete_help_video_callback(update: Update, context: ContextTypes.DEFAU
 # Broadcast command (super admin only)
 # ----------------------------------------------------------------------
 async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        return
+    if update.effective_user.id not in ADMIN_IDS: return
     if not context.args:
         await update.message.reply_text("استخدم: /broadcast <النص>")
         return
@@ -1346,7 +1295,7 @@ def schedule_jobs(app: Application):
     app.job_queue.run_repeating(weekly_excel, interval=7*24*60*60, first=next_sat)
 
 # ----------------------------------------------------------------------
-# Export functions used by commands and callbacks
+# Export functions
 # ----------------------------------------------------------------------
 async def export_problems(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file = generate_problems_excel()
@@ -1371,7 +1320,7 @@ async def export_vidange_vehicle(update: Update, context: ContextTypes.DEFAULT_T
     await update.message.reply_document(document=file, filename=f"فيدانج_{code}.xlsx")
 
 # ----------------------------------------------------------------------
-# Admin action callbacks (addveh, remveh, etc.) – these set user_data
+# Admin action callbacks
 # ----------------------------------------------------------------------
 async def admin_addveh(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1458,14 +1407,25 @@ async def vehicle_history_callback(update: Update, context: ContextTypes.DEFAULT
     await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_HISTORY, text=text)
 
 # ----------------------------------------------------------------------
-# Main
+# Webhook and aiohttp
 # ----------------------------------------------------------------------
-def main():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+async def health(request):
+    return web.Response(text="Bot is running")
+
+async def telegram_webhook(request):
+    data = await request.json()
+    update = Update.de_json(data, app.bot)
+    await app.process_update(update)
+    return web.Response(status=200)
+
+async def set_webhook(app: Application):
+    webhook_url = f"{WEBHOOK_URL}/telegram"
+    await app.bot.set_webhook(url=webhook_url)
+    logging.info(f"Webhook set to {webhook_url}")
+
+async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     init_db()
-
     global app
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -1526,23 +1486,21 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_listveh, pattern="^admin_listveh$"))
     app.add_handler(CallbackQueryHandler(vehicle_history_callback, pattern="^hist_"))
 
-    # Schedule jobs
     schedule_jobs(app)
+    await app.initialize()
+    await set_webhook(app)
 
-    # Initialize the application (required for webhook)
-    loop.run_until_complete(app.initialize())
+    aio_app = web.Application()
+    aio_app.router.add_get("/", health)
+    aio_app.router.add_post("/telegram", telegram_webhook)
 
-    # Set webhook
-    loop.run_until_complete(set_webhook(app))
-
-    # Start Flask server
     port = int(os.environ.get("PORT", 5000))
-    web_app.run(host="0.0.0.0", port=port)
+    runner = web.AppRunner(aio_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logging.info(f"Server listening on port {port}")
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        pass
-    except Exception as e:
-        logging.critical(f"Fatal: {e}", exc_info=True)
+    asyncio.run(main())
