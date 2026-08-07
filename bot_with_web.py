@@ -128,7 +128,7 @@ def init_db():
     conn.close()
 
 # ----------------------------------------------------------------------
-# Database functions (all previously defined)
+# Database functions (unchanged)
 # ----------------------------------------------------------------------
 def get_driver(user_id: int) -> dict | None:
     conn = get_conn()
@@ -596,6 +596,29 @@ def update_status_line(problem: dict, new_status: str = None, new_ruglee: str = 
     return f"السائق: {dname}\nالمركبة: {veh}\nالمشكلة: {prob_text}\n{status_line}"
 
 # ----------------------------------------------------------------------
+# Cancel handler for all input operations (driver & admin)
+# ----------------------------------------------------------------------
+async def cancel_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    # Clear all pending user data
+    context.user_data.clear()
+    # Reset driver state to idle if registered
+    driver = get_driver(user_id)
+    if driver and driver.get("approval_status") == "approved":
+        set_driver(user_id, state="idle")
+        await query.edit_message_text("تم الإلغاء.")
+        await context.bot.send_message(chat_id=user_id, text="يمكنك الآن استخدام الأزرار أدناه:", reply_markup=MAIN_KEYBOARD)
+    else:
+        await query.edit_message_text("تم الإلغاء.")
+        # If not approved, they will stay as pending or whatever; send start message
+        if driver and driver.get("approval_status") == "pending":
+            await query.edit_message_text("تم الإلغاء. لا تزال قيد المراجعة.")
+        else:
+            await query.edit_message_text("تم الإلغاء. ابدأ من جديد /start")
+
+# ----------------------------------------------------------------------
 # Core handlers
 # ----------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -615,10 +638,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("شكراً لتسجيلك. طلب صلاحيتك قيد المراجعة. انتظر قبول المشرف.")
     else:
         set_driver(user_id, state="name_entry", approval_status="pending")
-        await update.message.reply_text("مرحباً! الرجاء إدخال اسمك الكامل:")
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]])
+        await update.message.reply_text("مرحباً! الرجاء إدخال اسمك الكامل:", reply_markup=markup)
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Only process text in private chats (drivers)
     if update.effective_chat.type != "private":
         return
 
@@ -627,7 +650,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     driver = get_driver(user_id)
     state = driver["state"] if driver else "name_entry"
 
-    # Non-allowed users
     if user_id not in ADMIN_IDS and not is_allowed(user_id):
         if state == "name_entry":
             set_driver(user_id, name=text, state="awaiting_approval", approval_status="pending")
@@ -649,21 +671,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("غير مصرح لك باستخدام البوت حالياً.")
             return
 
-    # Comment session
     if context.user_data.get("awaiting_comment"):
         problem_id = context.user_data.pop("awaiting_comment")
         set_problem_comment(problem_id, text)
         await update.message.reply_text("✅ تم حفظ التعليق بنجاح.", reply_markup=MAIN_KEYBOARD)
         return
 
-    # KM after vidange repair
     if context.user_data.get("await_km"):
         vehicle = context.user_data["await_km_vehicle"]
         if text.isdigit():
             km = int(text)
             last_km = get_latest_km(vehicle)
             if last_km is not None and km <= last_km:
-                await update.message.reply_text(f"⚠️ الكيلومتر يجب أن يكون أكبر من آخر قراءة ({last_km} كم). أعد إدخال القيمة الصحيحة.")
+                await update.message.reply_text(f"⚠️ الكيلومتر يجب أن يكون أكبر من آخر قراءة ({last_km} كم). أعد إدخال القيمة الصحيحة.",
+                                                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]]))
                 return
             driver_name = driver["name"] if driver else "Unknown"
             msg = await context.bot.send_message(
@@ -685,10 +706,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.clear()
             return
         else:
-            await update.message.reply_text("الرجاء إرسال رقم صحيح.")
+            await update.message.reply_text("الرجاء إرسال رقم صحيح.",
+                                            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]]))
             return
 
-    # State machine
+    # State machine with cancel buttons
     if state == "name_entry":
         set_driver(user_id, name=text, state="vehicle_selection")
         vehicles = get_all_vehicles()
@@ -701,7 +723,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Main keyboard
     if text == "📝 تقديم شكوى":
-        await update.message.reply_text("أرسل وصف المشكلة (نص، صورة، فيديو، أو صوت).", reply_markup=MAIN_KEYBOARD)
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]])
+        await update.message.reply_text("أرسل وصف المشكلة (نص، صورة، فيديو، أو صوت).", reply_markup=markup)
         context.user_data["expecting_reclamation"] = True
         return
     if text == "✅ طلب التحقق من الإصلاح":
@@ -720,7 +743,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not driver or not driver["vehicle"]:
             await update.message.reply_text("يجب إكمال الملف أولاً.")
             return
-        await update.message.reply_text(f"أرسل عدد الكيلومترات الحالي للمركبة {driver['vehicle']}:", reply_markup=MAIN_KEYBOARD)
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]])
+        await update.message.reply_text(f"أرسل عدد الكيلومترات الحالي للمركبة {driver['vehicle']}:", reply_markup=markup)
         context.user_data["expecting_km"] = True
         return
     if text == "⚙️ الإعدادات":
@@ -736,7 +760,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Reclamation / km input
     if context.user_data.get("expecting_reclamation"):
         if not text:
-            await update.message.reply_text("الرجاء كتابة وصف للمشكلة. لا يمكن إرسال شكوى فارغة.", reply_markup=MAIN_KEYBOARD)
+            await update.message.reply_text("الرجاء كتابة وصف للمشكلة. لا يمكن إرسال شكوى فارغة.",
+                                            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]]))
             return
         context.user_data.pop("expecting_reclamation")
         if not driver or not driver["name"] or not driver["vehicle"]:
@@ -752,7 +777,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if context.user_data.get("expecting_km"):
         if not text.isdigit():
-            await update.message.reply_text("يجب إرسال رقم.")
+            await update.message.reply_text("يجب إرسال رقم.",
+                                            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]]))
             return
         km = int(text)
         vehicle = driver["vehicle"] if driver else None
@@ -761,7 +787,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         last_km = get_latest_km(vehicle)
         if last_km is not None and km <= last_km:
-            await update.message.reply_text(f"⚠️ الكيلومتر يجب أن يكون أكبر من آخر قراءة ({last_km} كم). أعد إدخال القيمة الصحيحة.")
+            await update.message.reply_text(f"⚠️ الكيلومتر يجب أن يكون أكبر من آخر قراءة ({last_km} كم). أعد إدخال القيمة الصحيحة.",
+                                            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]]))
             return
         context.user_data.pop("expecting_km")
         add_km_reading(vehicle, km, driver_name=driver["name"])
@@ -779,10 +806,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("استخدم الأزرار أدناه.", reply_markup=MAIN_KEYBOARD)
 
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Only process media in private chats (drivers)
     if update.effective_chat.type != "private":
         return
-
     user_id = update.effective_user.id
     driver = get_driver(user_id)
     if not driver or not driver["name"] or not driver["vehicle"] or driver.get("approval_status") != "approved":
@@ -898,7 +923,8 @@ async def comment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     problem_id = int(query.data.split("_")[1])
     context.user_data["awaiting_comment"] = problem_id
-    await context.bot.send_message(chat_id=query.from_user.id, text="📝 أرسل تعليقك على المشكلة:")
+    await context.bot.send_message(chat_id=query.from_user.id, text="📝 أرسل تعليقك على المشكلة:",
+                                   reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]]))
     await query.answer("أرسل التعليق في المحادثة الخاصة.", show_alert=True)
 
 async def delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -981,7 +1007,8 @@ async def vidange_modify_callback(update: Update, context: ContextTypes.DEFAULT_
         "vehicle": info["vehicle"],
         "message_id": query.message.message_id
     }
-    await query.edit_message_text("✏️ أرسل القيمة الصحيحة للكيلومتر بعد الفيدانج:")
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]])
+    await query.edit_message_text("✏️ أرسل القيمة الصحيحة للكيلومتر بعد الفيدانج:", reply_markup=markup)
 
 # ----------------------------------------------------------------------
 # Approval / Rejection callbacks
@@ -1099,14 +1126,16 @@ async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     if context.user_data.get("vidange_modify"):
         info = context.user_data.pop("vidange_modify")
         if not text.isdigit():
-            await update.message.reply_text("يجب أن يكون الكيلومتر رقماً. حاول مرة أخرى:")
+            await update.message.reply_text("يجب أن يكون الكيلومتر رقماً. حاول مرة أخرى:",
+                                            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]]))
             context.user_data["vidange_modify"] = info
             return
         km = int(text)
         vehicle = info["vehicle"]
         last_km = get_latest_km(vehicle)
         if last_km is not None and km <= last_km:
-            await update.message.reply_text(f"⚠️ الكيلومتر يجب أن يكون أكبر من آخر قراءة ({last_km} كم). أعد الإدخال.")
+            await update.message.reply_text(f"⚠️ الكيلومتر يجب أن يكون أكبر من آخر قراءة ({last_km} كم). أعد الإدخال.",
+                                            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]]))
             context.user_data["vidange_modify"] = info
             return
         add_km_reading(vehicle, km, driver_name="مشرف")
@@ -1127,7 +1156,8 @@ async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.user_data.pop("admin_urgentvid")
         parts = text.split()
         if len(parts) != 2 or not parts[1].isdigit():
-            await update.message.reply_text("صيغة خاطئة. استخدم: CODE KM")
+            await update.message.reply_text("صيغة خاطئة. استخدم: CODE KM",
+                                            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]]))
             return
         code = parts[0].upper()
         km = int(parts[1])
@@ -1157,7 +1187,8 @@ async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.user_data.pop("admin_setvid")
         parts = text.split()
         if len(parts) != 2 or not parts[1].isdigit():
-            await update.message.reply_text("صيغة خاطئة. استخدم: CODE KM")
+            await update.message.reply_text("صيغة خاطئة. استخدم: CODE KM",
+                                            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]]))
             return
         code = parts[0].upper()
         km = int(parts[1])
@@ -1328,34 +1359,38 @@ async def export_vidange_vehicle(update: Update, context: ContextTypes.DEFAULT_T
     await update.message.reply_document(document=file, filename=f"فيدانج_{code}.xlsx")
 
 # ----------------------------------------------------------------------
-# Admin action callbacks (addveh, remveh, etc.)
+# Admin action callbacks (addveh, remveh, etc.) with cancel buttons
 # ----------------------------------------------------------------------
 async def admin_addveh(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if query.from_user.id not in ADMIN_IDS: return
-    await query.edit_message_text("أرسل رمز المركبة الجديدة:")
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]])
+    await query.edit_message_text("أرسل رمز المركبة الجديدة:", reply_markup=markup)
     context.user_data["admin_add_veh"] = True
 
 async def admin_remveh(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if query.from_user.id not in ADMIN_IDS: return
-    await query.edit_message_text("أرسل رمز المركبة المراد حذفها:")
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]])
+    await query.edit_message_text("أرسل رمز المركبة المراد حذفها:", reply_markup=markup)
     context.user_data["admin_rem_veh"] = True
 
 async def admin_setvid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if query.from_user.id not in ADMIN_IDS: return
-    await query.edit_message_text("أرسل رمز المركبة ثم الكيلومتر (مثال: M02 150000):")
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]])
+    await query.edit_message_text("أرسل رمز المركبة ثم الكيلومتر (مثال: M02 150000):", reply_markup=markup)
     context.user_data["admin_setvid"] = True
 
 async def admin_urgentvid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if query.from_user.id not in ADMIN_IDS: return
-    await query.edit_message_text("أرسل رمز المركبة ثم الكيلومتر الجديد للفيدانج العاجل (مثال: M02 158000):")
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]])
+    await query.edit_message_text("أرسل رمز المركبة ثم الكيلومتر الجديد للفيدانج العاجل (مثال: M02 158000):", reply_markup=markup)
     context.user_data["admin_urgentvid"] = True
 
 async def admin_dash(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1415,14 +1450,12 @@ async def vehicle_history_callback(update: Update, context: ContextTypes.DEFAULT
     await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_HISTORY, text=text)
 
 # ----------------------------------------------------------------------
-# New command handlers for /admin and /panel
+# Command handlers for /admin and /panel
 # ----------------------------------------------------------------------
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /admin command – send the main admin panel."""
     await update.message.reply_text("🕹️ لوحة التحكم:", reply_markup=admin_main_keyboard())
 
 async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /panel command – send topic-specific panel if in a topic."""
     thread_id = update.message.message_thread_id if update.message else None
     keyboard = get_topic_keyboard(thread_id) if thread_id else None
     if keyboard:
@@ -1461,8 +1494,8 @@ async def main():
 
     # Command handlers
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("admin", admin_command))          # FIX: separate function
-    app.add_handler(CommandHandler("panel", panel_command))          # FIX: separate function
+    app.add_handler(CommandHandler("admin", admin_command))
+    app.add_handler(CommandHandler("panel", panel_command))
     app.add_handler(CommandHandler("sethelp", set_help_cmd))
     app.add_handler(CommandHandler("removehelp", remove_help_cmd))
     app.add_handler(CommandHandler("broadcast", broadcast_cmd))
@@ -1477,6 +1510,7 @@ async def main():
     app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.VOICE & filters.ChatType.PRIVATE, handle_media))
 
     # Callback handlers
+    app.add_handler(CallbackQueryHandler(cancel_input, pattern="^cancel_input$"))
     app.add_handler(CallbackQueryHandler(vehicle_selection_callback, pattern="^selv_"))
     app.add_handler(CallbackQueryHandler(confirm_vehicle_callback, pattern="^confirmveh_"))
     app.add_handler(CallbackQueryHandler(cancel_vehicle_selection_callback, pattern="^cancel_veh$"))
@@ -1516,9 +1550,7 @@ async def main():
     app.add_handler(CallbackQueryHandler(admin_listveh, pattern="^admin_listveh$"))
     app.add_handler(CallbackQueryHandler(vehicle_history_callback, pattern="^hist_"))
 
-    # Error handler
     app.add_error_handler(error_handler)
-
     schedule_jobs(app)
     await app.initialize()
     await set_webhook(app)
