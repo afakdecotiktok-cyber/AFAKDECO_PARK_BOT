@@ -600,6 +600,26 @@ def update_status_line(problem: dict, new_status: str = None, new_ruglee: str = 
     status_line = f"الحالة: {status_icon_and_text({'status': new_status or problem['status'], 'ruglee': new_ruglee or problem['ruglee']})}"
     return f"السائق: {dname}\nالمركبة: {veh}\nالمشكلة: {prob_text}\n{status_line}"
 
+async def _update_problem_message(problem: dict, new_status: str = None, new_ruglee: str = None):
+    if not problem["group_message_id"]:
+        return
+    new_text = update_status_line(problem, new_status=new_status, new_ruglee=new_ruglee)
+    try:
+        if problem["media_type"]:
+            await app.bot.edit_message_caption(
+                chat_id=ADMIN_GROUP_ID,
+                message_id=problem["group_message_id"],
+                caption=new_text
+            )
+        else:
+            await app.bot.edit_message_text(
+                chat_id=ADMIN_GROUP_ID,
+                message_id=problem["group_message_id"],
+                text=new_text
+            )
+    except Exception as e:
+        logging.warning(f"Could not update problem message: {e}")
+
 # ----------------------------------------------------------------------
 # Cancel handler
 # ----------------------------------------------------------------------
@@ -769,7 +789,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_RECLAMATIONS, text=report,
                                              reply_markup=build_problem_keyboard(0))
         problem_id = add_problem(user_id, driver["name"], driver["vehicle"], text, "", group_msg_id=msg.message_id)
-        await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id))
+        try:
+            await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id))
+        except Exception as e:
+            logging.error(f"Failed to set initial problem keyboard: {e}")
         await update.message.reply_text("تم إرسال الشكوى.", reply_markup=MAIN_KEYBOARD)
         return
     if context.user_data.get("expecting_km"):
@@ -818,21 +841,30 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = await context.bot.send_photo(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_RECLAMATIONS, photo=file_id,
                                            caption=header, reply_markup=build_problem_keyboard(0))
         problem_id = add_problem(user_id, driver["name"], driver["vehicle"], caption, media_type, group_msg_id=msg.message_id)
-        await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id))
+        try:
+            await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id))
+        except Exception as e:
+            logging.error(f"Failed to set media problem keyboard: {e}")
     elif update.message.video:
         file_id = update.message.video.file_id
         media_type = "فيديو"
         msg = await context.bot.send_video(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_RECLAMATIONS, video=file_id,
                                            caption=header, reply_markup=build_problem_keyboard(0))
         problem_id = add_problem(user_id, driver["name"], driver["vehicle"], caption, media_type, group_msg_id=msg.message_id)
-        await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id))
+        try:
+            await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id))
+        except Exception as e:
+            logging.error(f"Failed to set media problem keyboard: {e}")
     elif update.message.voice:
         file_id = update.message.voice.file_id
         media_type = "صوت"
         msg = await context.bot.send_voice(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_RECLAMATIONS, voice=file_id,
                                            caption=header, reply_markup=build_problem_keyboard(0))
         problem_id = add_problem(user_id, driver["name"], driver["vehicle"], caption, media_type, group_msg_id=msg.message_id)
-        await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id))
+        try:
+            await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id))
+        except Exception as e:
+            logging.error(f"Failed to set media problem keyboard: {e}")
     await update.message.reply_text("تم إرسال الشكوى.", reply_markup=MAIN_KEYBOARD)
 
 # ----------------------------------------------------------------------
@@ -878,7 +910,6 @@ async def valide_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ruglee_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    # All group members can repair
     problem_id = int(query.data.split("_")[1])
     problem = get_problem(problem_id)
     if not problem: return await query.answer("غير موجود.")
@@ -890,7 +921,6 @@ async def ruglee_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_ruglee = "تم الإصلاح" if problem["ruglee"] == "غير مُصلح" else "غير مُصلح"
     update_problem_status(problem_id, ruglee=new_ruglee)
     await _update_problem_message(problem, ruglee=new_ruglee)
-    # Update validation message if exists
     val_msg_id = context.bot_data.get("validation_msgs", {}).pop(problem_id, None)
     if val_msg_id:
         try:
@@ -907,27 +937,6 @@ async def ruglee_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(chat_id=req_id, text=f"تم تأكيد إصلاح الفيدانج للمركبة {problem['vehicle']}. الرجاء إدخال الكيلومترات الحالية:")
                 context.bot_data.setdefault("km_await", {})[req_id] = problem["vehicle"]
             except: pass
-
-async def _update_problem_message(problem: dict, new_status: str = None, new_ruglee: str = None):
-    if not problem["group_message_id"]:
-        return
-    new_text = update_status_line(problem, new_status=new_status, new_ruglee=new_ruglee)
-    try:
-        if problem["media_type"]:
-            # Media message: edit caption
-            await app.bot.edit_message_caption(
-                chat_id=ADMIN_GROUP_ID,
-                message_id=problem["group_message_id"],
-                caption=new_text
-            )
-        else:
-            await app.bot.edit_message_text(
-                chat_id=ADMIN_GROUP_ID,
-                message_id=problem["group_message_id"],
-                text=new_text
-            )
-    except Exception as e:
-        logging.warning(f"Could not update problem message: {e}")
 
 async def fix_comment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -970,7 +979,6 @@ async def cancel_delete_callback(update: Update, context: ContextTypes.DEFAULT_T
     problem_id = int(query.data.split("_")[1])
     problem = get_problem(problem_id)
     if not problem:
-        # Problem no longer exists, remove keyboard
         await query.edit_message_reply_markup(reply_markup=None)
         return
     await query.edit_message_reply_markup(reply_markup=build_problem_keyboard(problem_id))
@@ -1394,10 +1402,10 @@ async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         await update.message.reply_text("تم إرسال لوحة القيادة.")
 
+# Updated: allow all group members to request dashboard via button
 async def admin_dash(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if query.from_user.id not in ADMIN_IDS: return
     await _send_dashboard(ADMIN_GROUP_ID, TOPIC_GENERAL)
     await query.edit_message_text("تم إرسال لوحة القيادة.")
 
