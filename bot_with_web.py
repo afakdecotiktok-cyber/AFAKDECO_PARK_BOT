@@ -9,7 +9,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 # ----------------------------------------------------------------------
@@ -128,7 +128,7 @@ def init_db():
     conn.close()
 
 # ----------------------------------------------------------------------
-# Database functions
+# Database functions (unchanged)
 # ----------------------------------------------------------------------
 def get_driver(user_id: int) -> dict | None:
     conn = get_conn()
@@ -379,7 +379,7 @@ def is_allowed(user_id: int) -> bool:
 def get_all_drivers():
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT user_id, name, vehicle FROM drivers")
+    cur.execute("SELECT user_id, name, vehicle FROM drivers WHERE approval_status='approved'")
     rows = cur.fetchall()
     cur.close()
     conn.close()
@@ -395,7 +395,7 @@ def remove_driver(user_id: int):
     conn.close()
 
 # ----------------------------------------------------------------------
-# Excel generation
+# Excel generation (unchanged)
 # ----------------------------------------------------------------------
 def generate_problems_excel() -> BytesIO:
     problems = get_all_problems()
@@ -464,6 +464,10 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup([
     [KeyboardButton("🚗 إدخال عدد الكيلومترات"), KeyboardButton("⚙️ الإعدادات")]
 ], resize_keyboard=True)
 
+ADMIN_STICKY_KEYBOARD = ReplyKeyboardMarkup([
+    [KeyboardButton("/admin")]
+], resize_keyboard=True, one_time_keyboard=False)
+
 def vehicle_inline_keyboard(vehicles: list, prefix="selv_") -> InlineKeyboardMarkup:
     buttons = [InlineKeyboardButton(v, callback_data=f"{prefix}{v}") for v in vehicles]
     return InlineKeyboardMarkup([buttons[i:i+4] for i in range(0, len(buttons), 4)])
@@ -502,6 +506,7 @@ def admin_drivers_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ قبول سائقين", callback_data="admin_approve_list")],
         [InlineKeyboardButton("❌ حذف سائق", callback_data="admin_remove_driver_list")],
+        [InlineKeyboardButton("📋 قائمة السائقين", callback_data="admin_drivers_list")],
         [InlineKeyboardButton("↩️ رجوع", callback_data="admin_main")]
     ])
 
@@ -579,12 +584,13 @@ def build_problem_keyboard(problem_id: int) -> InlineKeyboardMarkup:
         if problem["media_type"] and not problem["comments"]:
             row1.append(InlineKeyboardButton("✅ تم الإصلاح (تعليق مطلوب)", callback_data=f"fix_comment_{problem_id}"))
         else:
+            # Show repair button for all group members (no admin check)
             row1.append(InlineKeyboardButton("✅ تم الإصلاح", callback_data=f"rug_{problem_id}"))
     rows = []
     if row1:
         rows.append(row1)
     rows.append([InlineKeyboardButton("💬 تعليق", callback_data=f"com_{problem_id}")])
-    if ruglee != "تم الإصلاح":
+    if ruglee != "تم الإصلاح" and query.from_user.id in ADMIN_IDS:  # Only super admins can delete
         rows.append([InlineKeyboardButton("🗑️ حذف", callback_data=f"del_{problem_id}")])
     return InlineKeyboardMarkup(rows)
 
@@ -596,27 +602,22 @@ def update_status_line(problem: dict, new_status: str = None, new_ruglee: str = 
     return f"السائق: {dname}\nالمركبة: {veh}\nالمشكلة: {prob_text}\n{status_line}"
 
 # ----------------------------------------------------------------------
-# Cancel handler for all input operations (driver & admin)
+# Cancel handler
 # ----------------------------------------------------------------------
 async def cancel_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user_id = query.from_user.id
-    # Clear all pending user data
     context.user_data.clear()
-    # Reset driver state to idle if registered
-    driver = get_driver(user_id)
-    if driver and driver.get("approval_status") == "approved":
-        set_driver(user_id, state="idle")
-        await query.edit_message_text("تم الإلغاء.")
-        await context.bot.send_message(chat_id=user_id, text="يمكنك الآن استخدام الأزرار أدناه:", reply_markup=MAIN_KEYBOARD)
-    else:
-        await query.edit_message_text("تم الإلغاء.")
-        # If not approved, they will stay as pending or whatever; send start message
-        if driver and driver.get("approval_status") == "pending":
-            await query.edit_message_text("تم الإلغاء. لا تزال قيد المراجعة.")
-        else:
-            await query.edit_message_text("تم الإلغاء. ابدأ من جديد /start")
+    if update.effective_chat.type == "private":
+        driver = get_driver(query.from_user.id)
+        if driver and driver.get("approval_status") == "approved":
+            set_driver(query.from_user.id, state="idle")
+            await query.edit_message_text("تم الإلغاء.")
+            await context.bot.send_message(chat_id=query.from_user.id,
+                                           text="يمكنك الآن استخدام الأزرار أدناه:",
+                                           reply_markup=MAIN_KEYBOARD)
+            return
+    await query.edit_message_text("تم الإلغاء.")
 
 # ----------------------------------------------------------------------
 # Core handlers
@@ -710,7 +711,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]]))
             return
 
-    # State machine with cancel buttons
     if state == "name_entry":
         set_driver(user_id, name=text, state="vehicle_selection")
         vehicles = get_all_vehicles()
@@ -721,7 +721,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("الرجاء اختيار المركبة من القائمة:", reply_markup=vehicle_inline_keyboard(vehicles, "selv_"))
         return
 
-    # Main keyboard
     if text == "📝 تقديم شكوى":
         markup = InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]])
         await update.message.reply_text("أرسل وصف المشكلة (نص، صورة، فيديو، أو صوت).", reply_markup=markup)
@@ -757,7 +756,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("اختر الإعداد المطلوب:", reply_markup=markup)
         return
 
-    # Reclamation / km input
     if context.user_data.get("expecting_reclamation"):
         if not text:
             await update.message.reply_text("الرجاء كتابة وصف للمشكلة. لا يمكن إرسال شكوى فارغة.",
@@ -839,7 +837,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("تم إرسال الشكوى.", reply_markup=MAIN_KEYBOARD)
 
 # ----------------------------------------------------------------------
-# Callback handlers
+# Callback handlers (modified)
 # ----------------------------------------------------------------------
 async def vehicle_selection_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -885,8 +883,7 @@ async def valide_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ruglee_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if query.from_user.id not in ADMIN_IDS:
-        await query.answer("⛔ غير مصرح.", show_alert=True); return
+    # Remove admin restriction – all group members can repair
     problem_id = int(query.data.split("_")[1])
     problem = get_problem(problem_id)
     if not problem: return await query.answer("غير موجود.")
@@ -897,12 +894,21 @@ async def ruglee_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     new_ruglee = "تم الإصلاح" if problem["ruglee"] == "غير مُصلح" else "غير مُصلح"
     update_problem_status(problem_id, ruglee=new_ruglee)
+    # Update original reclamation message
     if problem["group_message_id"]:
         try:
             new_text = update_status_line(problem, ruglee=new_ruglee)
             await context.bot.edit_message_text(chat_id=ADMIN_GROUP_ID, message_id=problem["group_message_id"], text=new_text)
         except: pass
+    # If there's a validation message, update it too
+    val_msg_id = context.bot_data.get("validation_msgs", {}).pop(problem_id, None)
+    if val_msg_id:
+        try:
+            await context.bot.edit_message_text(chat_id=ADMIN_GROUP_ID, message_id=val_msg_id,
+                                                text=f"📌 طلب تحقق من الإصلاح:\nالمشكلة #{problem_id} - {problem['problem_text']}\nالمركبة: {problem['vehicle']}\nالسائق: ...\nالحالة: ✅ تم الإصلاح")
+        except: pass
     await query.edit_message_reply_markup(reply_markup=build_problem_keyboard(problem_id))
+    # If vidange, ask driver for new km
     if problem["media_type"] == "نظام" and new_ruglee == "تم الإصلاح":
         req_id = problem.get("validation_requester") or problem.get("user_id")
         if req_id:
@@ -965,11 +971,49 @@ async def validation_request_callback(update: Update, context: ContextTypes.DEFA
     driver = get_driver(query.from_user.id)
     driver_name = driver["name"] if driver else "Unknown"
     msg_text = f"📌 طلب تحقق من الإصلاح:\nالمشكلة #{problem_id} - {problem['problem_text']}\nالمركبة: {problem['vehicle']}\nالسائق: {driver_name}\nالحالة: 📌 في انتظار التحقق"
-    await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_VALIDATION, text=msg_text,
-                                   reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ تم الإصلاح", callback_data=f"rug_{problem_id}")]]))
+    sent_msg = await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_VALIDATION, text=msg_text,
+                                              reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ تأكيد الإصلاح", callback_data=f"valrug_{problem_id}")]]))
+    # Store validation message ID
+    context.bot_data.setdefault("validation_msgs", {})[problem_id] = sent_msg.message_id
     await query.edit_message_text("تم إرسال طلب التحقق.")
 
+async def valrug_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the validation repair button – similar to ruglee but updates the validation message."""
+    query = update.callback_query
+    await query.answer()
+    problem_id = int(query.data.split("_")[1])
+    problem = get_problem(problem_id)
+    if not problem: return await query.answer("غير موجود.")
+    if problem["media_type"] and not problem["comments"]:
+        await query.answer("يجب إضافة تعليق أولاً قبل تأكيد الإصلاح.", show_alert=True)
+        await context.bot.send_message(chat_id=query.from_user.id, text="يجب إضافة تعليق للمشكلة قبل وضعها كمُصلحة. أرسل التعليق هنا.")
+        context.user_data["awaiting_comment"] = problem_id
+        return
+    new_ruglee = "تم الإصلاح" if problem["ruglee"] == "غير مُصلح" else "غير مُصلح"
+    update_problem_status(problem_id, ruglee=new_ruglee)
+    # Update original reclamation message
+    if problem["group_message_id"]:
+        try:
+            new_text = update_status_line(problem, ruglee=new_ruglee)
+            await context.bot.edit_message_text(chat_id=ADMIN_GROUP_ID, message_id=problem["group_message_id"], text=new_text)
+        except: pass
+    # Update the validation message (which triggered this callback)
+    try:
+        await query.edit_message_text(f"📌 طلب تحقق من الإصلاح:\nالمشكلة #{problem_id} - {problem['problem_text']}\nالمركبة: {problem['vehicle']}\nالسائق: ...\nالحالة: ✅ تم الإصلاح")
+    except: pass
+    # Clean up validation message ID
+    context.bot_data.get("validation_msgs", {}).pop(problem_id, None)
+    # If vidange, ask driver for new km
+    if problem["media_type"] == "نظام" and new_ruglee == "تم الإصلاح":
+        req_id = problem.get("validation_requester") or problem.get("user_id")
+        if req_id:
+            try:
+                await context.bot.send_message(chat_id=req_id, text=f"تم تأكيد إصلاح الفيدانج للمركبة {problem['vehicle']}. الرجاء إدخال الكيلومترات الحالية:")
+                context.bot_data.setdefault("km_await", {})[req_id] = problem["vehicle"]
+            except: pass
+
 async def vidange_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # unchanged
     query = update.callback_query
     await query.answer()
     if query.from_user.id not in ADMIN_IDS:
@@ -1007,7 +1051,10 @@ async def vidange_modify_callback(update: Update, context: ContextTypes.DEFAULT_
         "vehicle": info["vehicle"],
         "message_id": query.message.message_id
     }
-    markup = InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]])
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("إلغاء", callback_data="cancel_input"),
+         InlineKeyboardButton("↩️ رجوع", callback_data="admin_main")]
+    ])
     await query.edit_message_text("✏️ أرسل القيمة الصحيحة للكيلومتر بعد الفيدانج:", reply_markup=markup)
 
 # ----------------------------------------------------------------------
@@ -1096,6 +1143,16 @@ async def admin_remove_driver_list(update: Update, context: ContextTypes.DEFAULT
     buttons = [InlineKeyboardButton(f"{d['name']} ({d['user_id']})", callback_data=f"rmdriver_{d['user_id']}") for d in drivers]
     await query.edit_message_text("اختر سائقًا لحذفه:", reply_markup=InlineKeyboardMarkup([buttons[i:i+2] for i in range(0, len(buttons), 2)]))
 
+async def admin_drivers_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    drivers = get_all_drivers()
+    if not drivers:
+        await query.edit_message_text("لا يوجد سائقون نشطون.")
+        return
+    text = "👤 السائقون النشطون:\n" + "\n".join(f"• {d['name']} ({d['user_id']})" for d in drivers)
+    await query.edit_message_text(text)
+
 async def confirm_remove_driver(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1117,7 +1174,7 @@ async def confirm_remove_driver_exec(update: Update, context: ContextTypes.DEFAU
     except: pass
 
 # ----------------------------------------------------------------------
-# Admin input handler (vehicle add/remove, set vidange, urgent vidange, vidange modify)
+# Admin input handler (unchanged)
 # ----------------------------------------------------------------------
 async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -1127,7 +1184,8 @@ async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         info = context.user_data.pop("vidange_modify")
         if not text.isdigit():
             await update.message.reply_text("يجب أن يكون الكيلومتر رقماً. حاول مرة أخرى:",
-                                            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]]))
+                                            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input"),
+                                                                               InlineKeyboardButton("↩️ رجوع", callback_data="admin_main")]]))
             context.user_data["vidange_modify"] = info
             return
         km = int(text)
@@ -1135,7 +1193,8 @@ async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         last_km = get_latest_km(vehicle)
         if last_km is not None and km <= last_km:
             await update.message.reply_text(f"⚠️ الكيلومتر يجب أن يكون أكبر من آخر قراءة ({last_km} كم). أعد الإدخال.",
-                                            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]]))
+                                            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input"),
+                                                                               InlineKeyboardButton("↩️ رجوع", callback_data="admin_main")]]))
             context.user_data["vidange_modify"] = info
             return
         add_km_reading(vehicle, km, driver_name="مشرف")
@@ -1157,7 +1216,8 @@ async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         parts = text.split()
         if len(parts) != 2 or not parts[1].isdigit():
             await update.message.reply_text("صيغة خاطئة. استخدم: CODE KM",
-                                            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]]))
+                                            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input"),
+                                                                               InlineKeyboardButton("↩️ رجوع", callback_data="admin_main")]]))
             return
         code = parts[0].upper()
         km = int(parts[1])
@@ -1188,7 +1248,8 @@ async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         parts = text.split()
         if len(parts) != 2 or not parts[1].isdigit():
             await update.message.reply_text("صيغة خاطئة. استخدم: CODE KM",
-                                            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]]))
+                                            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input"),
+                                                                               InlineKeyboardButton("↩️ رجوع", callback_data="admin_main")]]))
             return
         code = parts[0].upper()
         km = int(parts[1])
@@ -1199,7 +1260,7 @@ async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"✅ تم تعيين آخر فيدانج لـ {code} = {km} كم.")
 
 # ----------------------------------------------------------------------
-# Settings callbacks
+# Settings callbacks (unchanged)
 # ----------------------------------------------------------------------
 async def settings_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1241,7 +1302,7 @@ async def cancel_name_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.edit_message_text("تم إلغاء تغيير الاسم.")
 
 # ----------------------------------------------------------------------
-# Help video commands
+# Help video commands (unchanged)
 # ----------------------------------------------------------------------
 async def set_help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS: return
@@ -1300,7 +1361,7 @@ async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"تم إرسال الرسالة إلى {count} سائق.")
 
 # ----------------------------------------------------------------------
-# Dashboard functions (FIXED)
+# Dashboard functions
 # ----------------------------------------------------------------------
 async def _send_dashboard(chat_id: int, thread_id: int = None):
     vehicles = get_all_vehicles()
@@ -1319,7 +1380,6 @@ async def _send_dashboard(chat_id: int, thread_id: int = None):
         logging.warning(f"Dashboard send error: {e}")
 
 async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /dashboard command – send to the same chat/thread."""
     chat_id = update.effective_chat.id
     thread_id = update.message.message_thread_id if update.message else None
     await _send_dashboard(chat_id, thread_id)
@@ -1379,13 +1439,35 @@ async def export_vidange_vehicle(update: Update, context: ContextTypes.DEFAULT_T
     await update.message.reply_document(document=file, filename=f"فيدانج_{code}.xlsx")
 
 # ----------------------------------------------------------------------
-# Admin action callbacks (addveh, remveh, etc.) with cancel buttons
+# Sticky admin panel command
+# ----------------------------------------------------------------------
+async def set_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    await update.message.reply_text(
+        "تم تفعيل لوحة التحكم السريعة. استخدم الزر أدناه للوصول السريع.",
+        reply_markup=ADMIN_STICKY_KEYBOARD
+    )
+
+async def remove_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    await update.message.reply_text(
+        "تم إخفاء لوحة التحكم السريعة.",
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+# ----------------------------------------------------------------------
+# Admin action callbacks (addveh, remveh, etc.)
 # ----------------------------------------------------------------------
 async def admin_addveh(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if query.from_user.id not in ADMIN_IDS: return
-    markup = InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]])
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("إلغاء", callback_data="cancel_input"),
+         InlineKeyboardButton("↩️ رجوع", callback_data="admin_main")]
+    ])
     await query.edit_message_text("أرسل رمز المركبة الجديدة:", reply_markup=markup)
     context.user_data["admin_add_veh"] = True
 
@@ -1393,7 +1475,10 @@ async def admin_remveh(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if query.from_user.id not in ADMIN_IDS: return
-    markup = InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]])
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("إلغاء", callback_data="cancel_input"),
+         InlineKeyboardButton("↩️ رجوع", callback_data="admin_main")]
+    ])
     await query.edit_message_text("أرسل رمز المركبة المراد حذفها:", reply_markup=markup)
     context.user_data["admin_rem_veh"] = True
 
@@ -1401,7 +1486,10 @@ async def admin_setvid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if query.from_user.id not in ADMIN_IDS: return
-    markup = InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]])
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("إلغاء", callback_data="cancel_input"),
+         InlineKeyboardButton("↩️ رجوع", callback_data="admin_main")]
+    ])
     await query.edit_message_text("أرسل رمز المركبة ثم الكيلومتر (مثال: M02 150000):", reply_markup=markup)
     context.user_data["admin_setvid"] = True
 
@@ -1409,16 +1497,12 @@ async def admin_urgentvid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if query.from_user.id not in ADMIN_IDS: return
-    markup = InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]])
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("إلغاء", callback_data="cancel_input"),
+         InlineKeyboardButton("↩️ رجوع", callback_data="admin_main")]
+    ])
     await query.edit_message_text("أرسل رمز المركبة ثم الكيلومتر الجديد للفيدانج العاجل (مثال: M02 158000):", reply_markup=markup)
     context.user_data["admin_urgentvid"] = True
-
-async def admin_dash(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if query.from_user.id not in ADMIN_IDS: return
-    await _send_dashboard(ADMIN_GROUP_ID, TOPIC_GENERAL)
-    await query.edit_message_text("تم إرسال لوحة القيادة.")
 
 async def admin_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1460,17 +1544,30 @@ async def vehicle_history_callback(update: Update, context: ContextTypes.DEFAULT
     if problems:
         text += "\n📋 المشاكل:\n"
         for p in problems:
-            text += f"  #{p['id']} | {p['date']} | {p['problem_text'][:40]} | {status_icon_and_text(p)}\n"
+            # Create clickable link for problem ID
+            link = f"https://t.me/c/{str(ADMIN_GROUP_ID)[4:]}/{p['group_message_id']}" if p['group_message_id'] else "#"
+            text += f"  <a href='{link}'>#{p['id']}</a> | {p['date']} | {p['problem_text'][:40]} | {status_icon_and_text(p)}\n"
     else:
         text += "لا توجد مشاكل مسجلة.\n"
     if readings:
         text += "\n🛢️ آخر قراءات العداد:\n"
         for d, k in readings:
             text += f"  {d} - {k} كم\n"
-    await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_HISTORY, text=text)
+    # Add "done" button to delete the message
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("تم", callback_data="done_hist")]])
+    await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_HISTORY, text=text, parse_mode="HTML", reply_markup=markup)
+
+async def done_history_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    # Delete the history message
+    try:
+        await query.message.delete()
+    except Exception as e:
+        logging.warning(f"Could not delete history message: {e}")
 
 # ----------------------------------------------------------------------
-# Command handlers for /admin and /panel
+# Command handlers for /admin, /panel, /setadminpanel, /removeadminpanel
 # ----------------------------------------------------------------------
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🕹️ لوحة التحكم:", reply_markup=admin_main_keyboard())
@@ -1516,13 +1613,15 @@ async def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(CommandHandler("panel", panel_command))
-    app.add_handler(CommandHandler("dashboard", dashboard_command))  # FIXED
+    app.add_handler(CommandHandler("dashboard", dashboard_command))
     app.add_handler(CommandHandler("sethelp", set_help_cmd))
     app.add_handler(CommandHandler("removehelp", remove_help_cmd))
     app.add_handler(CommandHandler("broadcast", broadcast_cmd))
     app.add_handler(CommandHandler("export", export_problems))
     app.add_handler(CommandHandler("export_vidange", export_vidange))
     app.add_handler(CommandHandler("vidange", export_vidange_vehicle))
+    app.add_handler(CommandHandler("setadminpanel", set_admin_panel))
+    app.add_handler(CommandHandler("removeadminpanel", remove_admin_panel))
 
     # Text / Media handlers (restricted to private chats)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_text))
@@ -1542,6 +1641,7 @@ async def main():
     app.add_handler(CallbackQueryHandler(confirm_delete_callback, pattern="^confirmdel_"))
     app.add_handler(CallbackQueryHandler(cancel_delete_callback, pattern="^cancel_"))
     app.add_handler(CallbackQueryHandler(validation_request_callback, pattern="^valreq_"))
+    app.add_handler(CallbackQueryHandler(valrug_callback, pattern="^valrug_"))
     app.add_handler(CallbackQueryHandler(vidange_confirm_callback, pattern="^vidconfirm_"))
     app.add_handler(CallbackQueryHandler(vidange_modify_callback, pattern="^vidmodify_"))
     app.add_handler(CallbackQueryHandler(approve_callback, pattern="^approve_"))
@@ -1553,6 +1653,7 @@ async def main():
     app.add_handler(CallbackQueryHandler(admin_export_menu, pattern="^admin_export_menu$"))
     app.add_handler(CallbackQueryHandler(admin_approve_list, pattern="^admin_approve_list$"))
     app.add_handler(CallbackQueryHandler(admin_remove_driver_list, pattern="^admin_remove_driver_list$"))
+    app.add_handler(CallbackQueryHandler(admin_drivers_list, pattern="^admin_drivers_list$"))
     app.add_handler(CallbackQueryHandler(confirm_remove_driver, pattern="^rmdriver_"))
     app.add_handler(CallbackQueryHandler(confirm_remove_driver_exec, pattern="^confirmrm_"))
     app.add_handler(CallbackQueryHandler(settings_help, pattern="^settings_help$"))
@@ -1569,6 +1670,7 @@ async def main():
     app.add_handler(CallbackQueryHandler(admin_vid, pattern="^admin_vid$"))
     app.add_handler(CallbackQueryHandler(admin_listveh, pattern="^admin_listveh$"))
     app.add_handler(CallbackQueryHandler(vehicle_history_callback, pattern="^hist_"))
+    app.add_handler(CallbackQueryHandler(done_history_callback, pattern="^done_hist$"))
 
     app.add_error_handler(error_handler)
     schedule_jobs(app)
