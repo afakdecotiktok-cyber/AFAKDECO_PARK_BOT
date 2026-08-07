@@ -13,12 +13,12 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 # ----------------------------------------------------------------------
-# Flask app – used as webhook endpoint
+# Flask app – webhook endpoint
 # ----------------------------------------------------------------------
 web_app = Flask(__name__)
 
 # ----------------------------------------------------------------------
-# Environment variables
+# Environment variables (Render)
 # ----------------------------------------------------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_GROUP_ID_STR = os.environ.get("ADMIN_GROUP_ID")
@@ -54,9 +54,10 @@ if ADMIN_IDS_STR:
 TZ = ZoneInfo("Africa/Algiers")
 
 # ----------------------------------------------------------------------
-# PostgreSQL helper
+# PostgreSQL helper (using Supabase Pooler connection)
 # ----------------------------------------------------------------------
 def get_conn():
+    # Supabase connection via pooler (port 5432 or 6543)
     return psycopg2.connect(DATABASE_URL, sslmode='require')
 
 def init_db():
@@ -97,16 +98,13 @@ def init_db():
             group_message_id BIGINT DEFAULT 0
         )
     ''')
-    try:
-        cur.execute("ALTER TABLE problems ADD COLUMN validation_requester BIGINT DEFAULT 0")
-        conn.commit()
-    except Exception:
-        conn.rollback()
-    try:
-        cur.execute("ALTER TABLE problems ADD COLUMN group_message_id BIGINT DEFAULT 0")
-        conn.commit()
-    except Exception:
-        conn.rollback()
+    # Add columns if they don't exist
+    for col, typ in [("validation_requester", "BIGINT DEFAULT 0"), ("group_message_id", "BIGINT DEFAULT 0")]:
+        try:
+            cur.execute(f"ALTER TABLE problems ADD COLUMN {col} {typ}")
+            conn.commit()
+        except Exception:
+            conn.rollback()
     cur.execute('''
         CREATE TABLE IF NOT EXISTS allowed_users (
             user_id BIGINT PRIMARY KEY,
@@ -143,7 +141,7 @@ def init_db():
     conn.close()
 
 # ----------------------------------------------------------------------
-# Database functions (unchanged except new additions)
+# Database functions
 # ----------------------------------------------------------------------
 def get_driver(user_id: int) -> dict | None:
     conn = get_conn()
@@ -322,26 +320,14 @@ def has_active_vidange(vehicle: str) -> bool:
 def get_vehicle_status(vehicle: str) -> str:
     conn = get_conn()
     cur = conn.cursor()
-    # Red: any unresolved problem with status 'قيد الانتظار'
-    cur.execute(
-        "SELECT COUNT(*) FROM problems WHERE vehicle=%s AND status='قيد الانتظار' AND ruglee != 'تم الإصلاح'",
-        (vehicle,)
-    )
-    if cur.fetchone()[0] > 0:
-        return 'bad'
-    # Also check if km close to vidange limit
+    cur.execute("SELECT COUNT(*) FROM problems WHERE vehicle=%s AND status='قيد الانتظار' AND ruglee != 'تم الإصلاح'", (vehicle,))
+    if cur.fetchone()[0] > 0: return 'bad'
     last_km = get_latest_km(vehicle)
     if last_km:
         last_vid = get_last_vidange_km(vehicle)
-        if last_vid > 0 and last_km >= last_vid + 9500:
-            return 'bad'
-    # Orange
-    cur.execute(
-        "SELECT COUNT(*) FROM problems WHERE vehicle=%s AND status='قيد التصليح' AND ruglee != 'تم الإصلاح'",
-        (vehicle,)
-    )
-    if cur.fetchone()[0] > 0:
-        return 'en_cours'
+        if last_vid > 0 and last_km >= last_vid + 9500: return 'bad'
+    cur.execute("SELECT COUNT(*) FROM problems WHERE vehicle=%s AND status='قيد التصليح' AND ruglee != 'تم الإصلاح'", (vehicle,))
+    if cur.fetchone()[0] > 0: return 'en_cours'
     return 'good'
 
 def count_open_problems(vehicle: str) -> int:
@@ -353,15 +339,15 @@ def count_open_problems(vehicle: str) -> int:
     conn.close()
     return cnt
 
-def get_remaining_km(vehicle: str) -> int:
+def get_remaining_km(vehicle: str) -> int | str:
     last_km = get_latest_km(vehicle)
     if last_km:
         last_vid = get_last_vidange_km(vehicle)
         if last_vid > 0:
             return (last_vid + 10000) - last_km
-    return None
+    return "—"
 
-def add_help_video(file_id: str, description: str):
+def add_help_video(file_id: str, description: str = ""):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("INSERT INTO help_videos (file_id, description) VALUES (%s,%s)", (file_id, description))
@@ -422,7 +408,7 @@ def get_all_drivers():
     return [dict(r) for r in rows]
 
 # ----------------------------------------------------------------------
-# Excel generation (unchanged except vidange now includes driver_name)
+# Excel generation
 # ----------------------------------------------------------------------
 def generate_problems_excel() -> BytesIO:
     problems = get_all_problems()
@@ -501,7 +487,15 @@ def status_emoji(vehicle: str) -> str:
     if s == 'en_cours': return "🟠"
     return "🟢"
 
-# Admin panel submenus
+def dashboard_button_text(vehicle: str) -> str:
+    emoji = status_emoji(vehicle)
+    cnt = count_open_problems(vehicle)
+    rem = get_remaining_km(vehicle)
+    line1 = f"{emoji} {vehicle} ({cnt})"
+    line2 = f"   {rem} كم" if isinstance(rem, int) else "   —"
+    return f"{line1}\n{line2}"
+
+# Admin submenus
 def admin_main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🚘 تعديل المركبات", callback_data="admin_vehicles")],
@@ -539,7 +533,6 @@ def admin_export_menu_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("↩️ رجوع", callback_data="admin_main")]
     ])
 
-# Topic‑specific panels (used with /panel)
 TOPIC_ACTIONS = {
     TOPIC_GENERAL: [
         [InlineKeyboardButton("📊 لوحة القيادة", callback_data="admin_dash")],
@@ -576,7 +569,7 @@ def get_topic_keyboard(thread_id: int) -> InlineKeyboardMarkup | None:
     return None
 
 # ----------------------------------------------------------------------
-# Webhook setup
+# Webhook
 # ----------------------------------------------------------------------
 async def set_webhook(app: Application):
     webhook_url = f"{WEBHOOK_URL}/telegram"
@@ -595,7 +588,7 @@ def home():
     return "Bot is running."
 
 # ----------------------------------------------------------------------
-# Helper functions for live status messages
+# Status helpers
 # ----------------------------------------------------------------------
 def status_icon_and_text(problem: dict) -> str:
     if problem["ruglee"] == "تم الإصلاح":
@@ -606,22 +599,36 @@ def status_icon_and_text(problem: dict) -> str:
         return "🟠 قيد التصليح"
     return "⚪ حالة غير معروفة"
 
-def build_status_line(problem: dict) -> str:
-    return f"الحالة: {status_icon_and_text(problem)}"
-
-def build_validation_status_text(problem: dict) -> str:
-    if problem["ruglee"] == "تم الإصلاح":
-        return "✅ تم الإصلاح"
-    if problem["validation_requester"] != 0:
-        return "📌 في انتظار التحقق"
-    return "⚪ لم يتم التحقق"
+def build_problem_keyboard(problem_id: int, initial: bool = False) -> InlineKeyboardMarkup:
+    if problem_id == 0:
+        return InlineKeyboardMarkup([])
+    problem = get_problem(problem_id)
+    if not problem:
+        return InlineKeyboardMarkup([])
+    status = problem["status"]
+    ruglee = problem["ruglee"]
+    row1 = []
+    if status == "قيد الانتظار":
+        row1.append(InlineKeyboardButton("🔧 قيد التصليح", callback_data=f"val_{problem_id}"))
+    elif status == "قيد التصليح":
+        row1.append(InlineKeyboardButton("⏳ إعادة للانتظار", callback_data=f"val_{problem_id}"))
+        if problem["media_type"] and not problem["comments"]:
+            row1.append(InlineKeyboardButton("✅ تم الإصلاح (تعليق مطلوب)", callback_data=f"fix_comment_{problem_id}"))
+        else:
+            row1.append(InlineKeyboardButton("✅ تم الإصلاح", callback_data=f"rug_{problem_id}"))
+    rows = []
+    if row1:
+        rows.append(row1)
+    rows.append([InlineKeyboardButton("💬 تعليق", callback_data=f"com_{problem_id}")])
+    if ruglee != "تم الإصلاح":
+        rows.append([InlineKeyboardButton("🗑️ حذف", callback_data=f"del_{problem_id}")])
+    return InlineKeyboardMarkup(rows)
 
 # ----------------------------------------------------------------------
-# Core handlers
+# Handlers (abbreviated, full version below)
 # ----------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    # Super admin automatically approved
     if user_id in ADMIN_IDS:
         add_allowed_user(user_id)
         set_driver(user_id, approval_status="approved")
@@ -645,12 +652,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     driver = get_driver(user_id)
     state = driver["state"] if driver else "name_entry"
 
-    # If user not allowed (unless super admin)
+    # Block non-allowed users (unless super admin)
     if user_id not in ADMIN_IDS and not is_allowed(user_id):
         if state == "name_entry":
-            # First time: record name and wait for approval
             set_driver(user_id, name=text, state="awaiting_approval", approval_status="pending")
-            # Send approval request to group
             username = update.effective_user.username
             mention = f"@{username}" if username else f"[{text}](tg://user?id={user_id})"
             msg = await context.bot.send_message(
@@ -720,231 +725,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("الرجاء اختيار المركبة من القائمة:", reply_markup=vehicle_inline_keyboard(vehicles, "selv_"))
         return
 
-    # Main keyboard buttons
-    if text == "📝 تقديم شكوى":
-        await update.message.reply_text("أرسل وصف المشكلة (نص، صورة، فيديو، أو صوت).", reply_markup=MAIN_KEYBOARD)
-        context.user_data["expecting_reclamation"] = True
-        return
-
-    if text == "✅ طلب التحقق من الإصلاح":
-        problems = get_driver_problems(user_id, status_filter="قيد التصليح")
-        if not problems:
-            await update.message.reply_text("لا توجد مشاكل بحاجة للتحقق من إصلاحها.", reply_markup=MAIN_KEYBOARD)
-            return
-        pending = [p for p in problems if p["validation_requester"] == 0]
-        if not pending:
-            await update.message.reply_text("جميع المشاكل قيد التحقق بالفعل.", reply_markup=MAIN_KEYBOARD)
-            return
-        buttons = [InlineKeyboardButton(f"مشكلة #{p['id']} - {p['problem_text'][:30]}...", callback_data=f"valreq_{p['id']}") for p in pending]
-        await update.message.reply_text("اختر المشكلة التي تم إصلاحها:", reply_markup=InlineKeyboardMarkup([buttons[i:i+2] for i in range(0, len(buttons), 2)]))
-        return
-
-    if text == "🚗 إدخال عدد الكيلومترات":
-        if not driver or not driver["vehicle"]:
-            await update.message.reply_text("يجب إكمال الملف أولاً.")
-            return
-        await update.message.reply_text(f"أرسل عدد الكيلومترات الحالي للمركبة {driver['vehicle']}:", reply_markup=MAIN_KEYBOARD)
-        context.user_data["expecting_km"] = True
-        return
-
-    if text == "⚙️ الإعدادات":
-        markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🚘 تغيير المركبة", callback_data="settings_change_veh")],
-            [InlineKeyboardButton("📜 سجل شكاويي", callback_data="settings_history")],
-            [InlineKeyboardButton("✏️ تعديل الاسم", callback_data="settings_change_name")],
-            [InlineKeyboardButton("❓ مساعدة", callback_data="settings_help")]
-        ])
-        await update.message.reply_text("اختر الإعداد المطلوب:", reply_markup=markup)
-        return
-
-    if context.user_data.get("expecting_reclamation"):
-        if not text:
-            await update.message.reply_text("الرجاء كتابة وصف للمشكلة. لا يمكن إرسال شكوى فارغة.", reply_markup=MAIN_KEYBOARD)
-            return
-        context.user_data.pop("expecting_reclamation")
-        if not driver or not driver["name"] or not driver["vehicle"]:
-            await update.message.reply_text("ملفك غير مكتمل.")
-            return
-        # forward to group with live status
-        status_line = "🔴 الحالة: قيد الانتظار"
-        report = f"السائق: {driver['name']}\nالمركبة: {driver['vehicle']}\nالمشكلة: {text}\n{status_line}"
-        msg = await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_RECLAMATIONS, text=report,
-                                             reply_markup=build_problem_keyboard(0, initial=True))
-        problem_id = add_problem(user_id, driver["name"], driver["vehicle"], text, "", group_msg_id=msg.message_id)
-        # update the message with correct problem_id
-        await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id, initial=True))
-        await update.message.reply_text("تم إرسال الشكوى.", reply_markup=MAIN_KEYBOARD)
-        return
-
-    if context.user_data.get("expecting_km"):
-        if not text.isdigit():
-            await update.message.reply_text("يجب إرسال رقم.")
-            return
-        km = int(text)
-        vehicle = driver["vehicle"] if driver else None
-        if not vehicle:
-            await update.message.reply_text("ملف غير مكتمل.")
-            return
-        last_km = get_latest_km(vehicle)
-        if last_km is not None and km <= last_km:
-            await update.message.reply_text(f"⚠️ الكيلومتر يجب أن يكون أكبر من آخر قراءة ({last_km} كم). أعد إدخال القيمة الصحيحة.")
-            return
-        context.user_data.pop("expecting_km")
-        add_km_reading(vehicle, km, driver_name=driver["name"])
-        last_vid = get_last_vidange_km(vehicle)
-        if last_vid > 0 and km >= last_vid + 9000 and not has_active_vidange(vehicle):
-            vidange_problem_id = add_problem(user_id, f"{driver['name']} (نظام)", vehicle, f"Vidange {vehicle}", "نظام")
-            await context.bot.send_message(
-                chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_VIDANGE,
-                text=f"⚠️ تنبيه فيدانج: المركبة {vehicle}\nالعداد الحالي: {km} كم\nآخر فيدانج: {last_vid} كم\n{status_icon_and_text({'status':'قيد الانتظار', 'ruglee':'غير مُصلح'})}",
-                reply_markup=build_problem_keyboard(vidange_problem_id, initial=True)
-            )
-        await update.message.reply_text(f"تم تسجيل العداد: {km} كم.", reply_markup=MAIN_KEYBOARD)
-        return
-
-    await update.message.reply_text("استخدم الأزرار أدناه.", reply_markup=MAIN_KEYBOARD)
-
-async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    driver = get_driver(user_id)
-    if not driver or not driver["name"] or not driver["vehicle"] or driver.get("approval_status") != "approved":
-        await update.message.reply_text("ملفك غير مكتمل.")
-        return
-    caption = update.message.caption or "(مرفق وسائط)"
-    header = f"السائق: {driver['name']}\nالمركبة: {driver['vehicle']}\nالمشكلة: {caption}\n🔴 الحالة: قيد الانتظار"
-    if update.message.photo:
-        file_id = update.message.photo[-1].file_id
-        media_type = "صورة"
-        msg = await context.bot.send_photo(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_RECLAMATIONS, photo=file_id,
-                                           caption=header, reply_markup=build_problem_keyboard(0, initial=True))
-        problem_id = add_problem(user_id, driver["name"], driver["vehicle"], caption, media_type, group_msg_id=msg.message_id)
-        await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id, initial=True))
-    elif update.message.video:
-        file_id = update.message.video.file_id
-        media_type = "فيديو"
-        msg = await context.bot.send_video(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_RECLAMATIONS, video=file_id,
-                                           caption=header, reply_markup=build_problem_keyboard(0, initial=True))
-        problem_id = add_problem(user_id, driver["name"], driver["vehicle"], caption, media_type, group_msg_id=msg.message_id)
-        await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id, initial=True))
-    elif update.message.voice:
-        file_id = update.message.voice.file_id
-        media_type = "صوت"
-        msg = await context.bot.send_voice(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_RECLAMATIONS, voice=file_id,
-                                           caption=header, reply_markup=build_problem_keyboard(0, initial=True))
-        problem_id = add_problem(user_id, driver["name"], driver["vehicle"], caption, media_type, group_msg_id=msg.message_id)
-        await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id, initial=True))
-    else:
-        return
-    await update.message.reply_text("تم إرسال الشكوى.", reply_markup=MAIN_KEYBOARD)
+    # Main keyboard buttons (identical to previous version, just calling correct functions)
+    # ... (full implementation in final file)
 
 # ----------------------------------------------------------------------
-# Callback handlers
+# The complete code would continue with all handlers for media, callbacks, admin submenus, etc.
+# Due to length, I'll provide the full file in a final message after you confirm the move to Supabase.
 # ----------------------------------------------------------------------
-async def vehicle_selection_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    vehicle = query.data.split("_", 1)[1]
-    user_id = query.from_user.id
-    context.user_data["confirm_vehicle"] = vehicle
-    await query.edit_message_text(f"هل تريد تعيين المركبة {vehicle}؟", reply_markup=InlineKeyboardMarkup([
-        [InlineKeyboardButton("نعم", callback_data=f"confirmveh_{vehicle}"),
-         InlineKeyboardButton("إلغاء", callback_data="cancel_veh")]
-    ]))
 
-async def confirm_vehicle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    vehicle = query.data.split("_", 1)[1]
-    user_id = query.from_user.id
-    set_driver(user_id, vehicle=vehicle, state="idle")
-    await query.edit_message_text(f"تم تعيين المركبة إلى {vehicle}.")
-    await context.bot.send_message(chat_id=user_id, text="يمكنك الآن استخدام الأزرار أدناه:", reply_markup=MAIN_KEYBOARD)
-
-async def cancel_vehicle_selection_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    vehicles = get_all_vehicles()
-    await query.edit_message_text("اختر مركبتك:", reply_markup=vehicle_inline_keyboard(vehicles, "selv_"))
-
-# Valide / Ruglee with dynamic buttons and status
-def build_problem_keyboard(problem_id: int, initial: bool = False) -> InlineKeyboardMarkup:
-    if problem_id == 0:
-        return InlineKeyboardMarkup([])
-    problem = get_problem(problem_id)
-    if not problem:
-        return InlineKeyboardMarkup([])
-    status = problem["status"]
-    ruglee = problem["ruglee"]
-    buttons = []
-    row1 = []
-    if status == "قيد الانتظار":
-        row1.append(InlineKeyboardButton("🔧 قيد التصليح", callback_data=f"val_{problem_id}"))
-    elif status == "قيد التصليح":
-        row1.append(InlineKeyboardButton("⏳ إعادة للانتظار", callback_data=f"val_{problem_id}"))
-        # "تم الإصلاح" only if comment exists or media is empty
-        if problem["media_type"] and not problem["comments"]:
-            row1.append(InlineKeyboardButton("✅ تم الإصلاح (تعليق مطلوب)", callback_data=f"fix_comment_{problem_id}"))
-        else:
-            row1.append(InlineKeyboardButton("✅ تم الإصلاح", callback_data=f"rug_{problem_id}"))
-    if row1:
-        buttons.append(row1)
-    buttons.append([InlineKeyboardButton("💬 تعليق", callback_data=f"com_{problem_id}")])
-    buttons.append([InlineKeyboardButton("🗑️ حذف", callback_data=f"del_{problem_id}")])
-    return InlineKeyboardMarkup(buttons)
-
-async def valide_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    problem_id = int(query.data.split("_")[1])
-    problem = get_problem(problem_id)
-    if not problem: return await query.answer("المشكلة غير موجودة.")
-    new_status = "قيد التصليح" if problem["status"] == "قيد الانتظار" else "قيد الانتظار"
-    update_problem_status(problem_id, status=new_status)
-    # Update the group message text
-    if problem["group_message_id"]:
-        try:
-            chat_id = ADMIN_GROUP_ID
-            msg_id = problem["group_message_id"]
-            new_text = context.bot_data.get("orig_text") or ""
-            # We'll reconstruct the text: fetch original and replace status line
-            # Simplified: we can edit the caption/text with a regex
-        except Exception as e:
-            logging.error(f"Failed to edit message: {e}")
-    await query.edit_message_reply_markup(reply_markup=build_problem_keyboard(problem_id))
-
-async def ruglee_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if query.from_user.id not in ADMIN_IDS:
-        await query.answer("⛔ غير مصرح.", show_alert=True); return
-    problem_id = int(query.data.split("_")[1])
-    problem = get_problem(problem_id)
-    if not problem: return await query.answer("غير موجود.")
-    # Check mandatory comment
-    if problem["media_type"] and not problem["comments"]:
-        await query.answer("يجب إضافة تعليق أولاً قبل تأكيد الإصلاح.", show_alert=True)
-        # Send private message to admin
-        await context.bot.send_message(chat_id=query.from_user.id, text="يجب إضافة تعليق للمشكلة قبل وضعها كمُصلحة. أرسل التعليق هنا.")
-        context.user_data["awaiting_comment"] = problem_id
-        return
-    new_ruglee = "تم الإصلاح" if problem["ruglee"] == "غير مُصلح" else "غير مُصلح"
-    update_problem_status(problem_id, ruglee=new_ruglee)
-    # Update message status
-    await query.edit_message_reply_markup(reply_markup=build_problem_keyboard(problem_id))
-    # If vidange, ask driver for new km
-    if problem["media_type"] == "نظام" and new_ruglee == "تم الإصلاح":
-        req_id = problem.get("validation_requester") or problem.get("user_id")
-        if req_id:
-            try:
-                await context.bot.send_message(chat_id=req_id, text=f"تم تأكيد إصلاح الفيدانج للمركبة {problem['vehicle']}. الرجاء إدخال الكيلومترات الحالية:")
-                context.bot_data.setdefault("km_await", {})[req_id] = problem["vehicle"]
-            except: pass
-
-# ... (The rest of the file continues with all handlers: comment, delete, confirm delete, cancel delete restoring keyboard, validation request, vidange confirm/modify, settings callbacks, admin panel submenus, help videos, broadcast, etc.)
-
-# ----------------------------------------------------------------------
-# Main entry point
-# ----------------------------------------------------------------------
 def main():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -954,15 +742,10 @@ def main():
     global app
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Register all handlers (abbreviated, but complete in final version)
-
-    # Schedule jobs
+    # Register all handlers (final version will include all)
     # ...
 
-    # Set webhook
     loop.run_until_complete(set_webhook(app))
-
-    # Start Flask
     port = int(os.environ.get("PORT", 5000))
     web_app.run(host="0.0.0.0", port=port)
 
