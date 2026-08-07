@@ -128,7 +128,7 @@ def init_db():
     conn.close()
 
 # ----------------------------------------------------------------------
-# Database functions (all previously defined)
+# Database functions (all previously defined, unchanged)
 # ----------------------------------------------------------------------
 def get_driver(user_id: int) -> dict | None:
     conn = get_conn()
@@ -618,6 +618,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("مرحباً! الرجاء إدخال اسمك الكامل:")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Only process text in private chats (drivers)
+    if update.effective_chat.type != "private":
+        return
+
     user_id = update.effective_user.id
     text = update.message.text.strip()
     driver = get_driver(user_id)
@@ -775,6 +779,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("استخدم الأزرار أدناه.", reply_markup=MAIN_KEYBOARD)
 
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Only process media in private chats (drivers)
+    if update.effective_chat.type != "private":
+        return
+
     user_id = update.effective_user.id
     driver = get_driver(user_id)
     if not driver or not driver["name"] or not driver["vehicle"] or driver.get("approval_status") != "approved":
@@ -806,7 +814,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("تم إرسال الشكوى.", reply_markup=MAIN_KEYBOARD)
 
 # ----------------------------------------------------------------------
-# Callback handlers
+# Callback handlers (all existing ones unchanged)
 # ----------------------------------------------------------------------
 async def vehicle_selection_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1320,7 +1328,7 @@ async def export_vidange_vehicle(update: Update, context: ContextTypes.DEFAULT_T
     await update.message.reply_document(document=file, filename=f"فيدانج_{code}.xlsx")
 
 # ----------------------------------------------------------------------
-# Admin action callbacks
+# Admin action callbacks (addveh, remveh, setvid, urgentvid, dash, export, vid, listveh, history)
 # ----------------------------------------------------------------------
 async def admin_addveh(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1441,12 +1449,12 @@ async def main():
     app.add_handler(CommandHandler("export_vidange", export_vidange))
     app.add_handler(CommandHandler("vidange", export_vidange_vehicle))
 
-    # Text / Media handlers
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    # Text / Media handlers (restricted to private chats)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_text))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_input_handler), group=1)
-    app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.VOICE, handle_media))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.VOICE & filters.ChatType.PRIVATE, handle_media))
 
-    # Callback handlers
+    # Callback handlers (unchanged)
     app.add_handler(CallbackQueryHandler(vehicle_selection_callback, pattern="^selv_"))
     app.add_handler(CallbackQueryHandler(confirm_vehicle_callback, pattern="^confirmveh_"))
     app.add_handler(CallbackQueryHandler(cancel_vehicle_selection_callback, pattern="^cancel_veh$"))
