@@ -395,7 +395,7 @@ def remove_driver(user_id: int):
     conn.close()
 
 # ----------------------------------------------------------------------
-# Excel generation (unchanged)
+# Excel generation
 # ----------------------------------------------------------------------
 def generate_problems_excel() -> BytesIO:
     problems = get_all_problems()
@@ -584,13 +584,12 @@ def build_problem_keyboard(problem_id: int) -> InlineKeyboardMarkup:
         if problem["media_type"] and not problem["comments"]:
             row1.append(InlineKeyboardButton("✅ تم الإصلاح (تعليق مطلوب)", callback_data=f"fix_comment_{problem_id}"))
         else:
-            # Show repair button for all group members (no admin check)
             row1.append(InlineKeyboardButton("✅ تم الإصلاح", callback_data=f"rug_{problem_id}"))
     rows = []
     if row1:
         rows.append(row1)
     rows.append([InlineKeyboardButton("💬 تعليق", callback_data=f"com_{problem_id}")])
-    if ruglee != "تم الإصلاح" and query.from_user.id in ADMIN_IDS:  # Only super admins can delete
+    if ruglee != "تم الإصلاح":
         rows.append([InlineKeyboardButton("🗑️ حذف", callback_data=f"del_{problem_id}")])
     return InlineKeyboardMarkup(rows)
 
@@ -837,7 +836,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("تم إرسال الشكوى.", reply_markup=MAIN_KEYBOARD)
 
 # ----------------------------------------------------------------------
-# Callback handlers (modified)
+# Callback handlers
 # ----------------------------------------------------------------------
 async def vehicle_selection_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -873,17 +872,13 @@ async def valide_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not problem: return await query.answer("المشكلة غير موجودة.")
     new_status = "قيد التصليح" if problem["status"] == "قيد الانتظار" else "قيد الانتظار"
     update_problem_status(problem_id, status=new_status)
-    if problem["group_message_id"]:
-        try:
-            new_text = update_status_line(problem, new_status=new_status)
-            await context.bot.edit_message_text(chat_id=ADMIN_GROUP_ID, message_id=problem["group_message_id"], text=new_text)
-        except: pass
+    await _update_problem_message(problem, new_status=new_status)
     await query.edit_message_reply_markup(reply_markup=build_problem_keyboard(problem_id))
 
 async def ruglee_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    # Remove admin restriction – all group members can repair
+    # All group members can repair
     problem_id = int(query.data.split("_")[1])
     problem = get_problem(problem_id)
     if not problem: return await query.answer("غير موجود.")
@@ -894,21 +889,17 @@ async def ruglee_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     new_ruglee = "تم الإصلاح" if problem["ruglee"] == "غير مُصلح" else "غير مُصلح"
     update_problem_status(problem_id, ruglee=new_ruglee)
-    # Update original reclamation message
-    if problem["group_message_id"]:
-        try:
-            new_text = update_status_line(problem, ruglee=new_ruglee)
-            await context.bot.edit_message_text(chat_id=ADMIN_GROUP_ID, message_id=problem["group_message_id"], text=new_text)
-        except: pass
-    # If there's a validation message, update it too
+    await _update_problem_message(problem, ruglee=new_ruglee)
+    # Update validation message if exists
     val_msg_id = context.bot_data.get("validation_msgs", {}).pop(problem_id, None)
     if val_msg_id:
         try:
-            await context.bot.edit_message_text(chat_id=ADMIN_GROUP_ID, message_id=val_msg_id,
-                                                text=f"📌 طلب تحقق من الإصلاح:\nالمشكلة #{problem_id} - {problem['problem_text']}\nالمركبة: {problem['vehicle']}\nالسائق: ...\nالحالة: ✅ تم الإصلاح")
+            await context.bot.edit_message_text(
+                chat_id=ADMIN_GROUP_ID, message_id=val_msg_id,
+                text=f"📌 طلب تحقق من الإصلاح:\nالمشكلة #{problem_id} - {problem['problem_text']}\nالمركبة: {problem['vehicle']}\nالسائق: ...\nالحالة: ✅ تم الإصلاح"
+            )
         except: pass
     await query.edit_message_reply_markup(reply_markup=build_problem_keyboard(problem_id))
-    # If vidange, ask driver for new km
     if problem["media_type"] == "نظام" and new_ruglee == "تم الإصلاح":
         req_id = problem.get("validation_requester") or problem.get("user_id")
         if req_id:
@@ -916,6 +907,27 @@ async def ruglee_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(chat_id=req_id, text=f"تم تأكيد إصلاح الفيدانج للمركبة {problem['vehicle']}. الرجاء إدخال الكيلومترات الحالية:")
                 context.bot_data.setdefault("km_await", {})[req_id] = problem["vehicle"]
             except: pass
+
+async def _update_problem_message(problem: dict, new_status: str = None, new_ruglee: str = None):
+    if not problem["group_message_id"]:
+        return
+    new_text = update_status_line(problem, new_status=new_status, new_ruglee=new_ruglee)
+    try:
+        if problem["media_type"]:
+            # Media message: edit caption
+            await app.bot.edit_message_caption(
+                chat_id=ADMIN_GROUP_ID,
+                message_id=problem["group_message_id"],
+                caption=new_text
+            )
+        else:
+            await app.bot.edit_message_text(
+                chat_id=ADMIN_GROUP_ID,
+                message_id=problem["group_message_id"],
+                text=new_text
+            )
+    except Exception as e:
+        logging.warning(f"Could not update problem message: {e}")
 
 async def fix_comment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -956,6 +968,11 @@ async def cancel_delete_callback(update: Update, context: ContextTypes.DEFAULT_T
     query = update.callback_query
     await query.answer()
     problem_id = int(query.data.split("_")[1])
+    problem = get_problem(problem_id)
+    if not problem:
+        # Problem no longer exists, remove keyboard
+        await query.edit_message_reply_markup(reply_markup=None)
+        return
     await query.edit_message_reply_markup(reply_markup=build_problem_keyboard(problem_id))
 
 async def validation_request_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -973,12 +990,10 @@ async def validation_request_callback(update: Update, context: ContextTypes.DEFA
     msg_text = f"📌 طلب تحقق من الإصلاح:\nالمشكلة #{problem_id} - {problem['problem_text']}\nالمركبة: {problem['vehicle']}\nالسائق: {driver_name}\nالحالة: 📌 في انتظار التحقق"
     sent_msg = await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_VALIDATION, text=msg_text,
                                               reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ تأكيد الإصلاح", callback_data=f"valrug_{problem_id}")]]))
-    # Store validation message ID
     context.bot_data.setdefault("validation_msgs", {})[problem_id] = sent_msg.message_id
     await query.edit_message_text("تم إرسال طلب التحقق.")
 
 async def valrug_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the validation repair button – similar to ruglee but updates the validation message."""
     query = update.callback_query
     await query.answer()
     problem_id = int(query.data.split("_")[1])
@@ -991,19 +1006,13 @@ async def valrug_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     new_ruglee = "تم الإصلاح" if problem["ruglee"] == "غير مُصلح" else "غير مُصلح"
     update_problem_status(problem_id, ruglee=new_ruglee)
-    # Update original reclamation message
-    if problem["group_message_id"]:
-        try:
-            new_text = update_status_line(problem, ruglee=new_ruglee)
-            await context.bot.edit_message_text(chat_id=ADMIN_GROUP_ID, message_id=problem["group_message_id"], text=new_text)
-        except: pass
-    # Update the validation message (which triggered this callback)
+    await _update_problem_message(problem, ruglee=new_ruglee)
     try:
-        await query.edit_message_text(f"📌 طلب تحقق من الإصلاح:\nالمشكلة #{problem_id} - {problem['problem_text']}\nالمركبة: {problem['vehicle']}\nالسائق: ...\nالحالة: ✅ تم الإصلاح")
+        await query.edit_message_text(
+            f"📌 طلب تحقق من الإصلاح:\nالمشكلة #{problem_id} - {problem['problem_text']}\nالمركبة: {problem['vehicle']}\nالسائق: ...\nالحالة: ✅ تم الإصلاح"
+        )
     except: pass
-    # Clean up validation message ID
     context.bot_data.get("validation_msgs", {}).pop(problem_id, None)
-    # If vidange, ask driver for new km
     if problem["media_type"] == "نظام" and new_ruglee == "تم الإصلاح":
         req_id = problem.get("validation_requester") or problem.get("user_id")
         if req_id:
@@ -1013,7 +1022,6 @@ async def valrug_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except: pass
 
 async def vidange_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # unchanged
     query = update.callback_query
     await query.answer()
     if query.from_user.id not in ADMIN_IDS:
@@ -1174,7 +1182,7 @@ async def confirm_remove_driver_exec(update: Update, context: ContextTypes.DEFAU
     except: pass
 
 # ----------------------------------------------------------------------
-# Admin input handler (unchanged)
+# Admin input handler
 # ----------------------------------------------------------------------
 async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -1260,7 +1268,7 @@ async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"✅ تم تعيين آخر فيدانج لـ {code} = {km} كم.")
 
 # ----------------------------------------------------------------------
-# Settings callbacks (unchanged)
+# Settings callbacks
 # ----------------------------------------------------------------------
 async def settings_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1302,7 +1310,7 @@ async def cancel_name_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.edit_message_text("تم إلغاء تغيير الاسم.")
 
 # ----------------------------------------------------------------------
-# Help video commands (unchanged)
+# Help video commands
 # ----------------------------------------------------------------------
 async def set_help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS: return
@@ -1544,7 +1552,7 @@ async def vehicle_history_callback(update: Update, context: ContextTypes.DEFAULT
     if problems:
         text += "\n📋 المشاكل:\n"
         for p in problems:
-            # Create clickable link for problem ID
+            # Clickable link to the original message
             link = f"https://t.me/c/{str(ADMIN_GROUP_ID)[4:]}/{p['group_message_id']}" if p['group_message_id'] else "#"
             text += f"  <a href='{link}'>#{p['id']}</a> | {p['date']} | {p['problem_text'][:40]} | {status_icon_and_text(p)}\n"
     else:
@@ -1553,14 +1561,12 @@ async def vehicle_history_callback(update: Update, context: ContextTypes.DEFAULT
         text += "\n🛢️ آخر قراءات العداد:\n"
         for d, k in readings:
             text += f"  {d} - {k} كم\n"
-    # Add "done" button to delete the message
     markup = InlineKeyboardMarkup([[InlineKeyboardButton("تم", callback_data="done_hist")]])
     await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_HISTORY, text=text, parse_mode="HTML", reply_markup=markup)
 
 async def done_history_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    # Delete the history message
     try:
         await query.message.delete()
     except Exception as e:
