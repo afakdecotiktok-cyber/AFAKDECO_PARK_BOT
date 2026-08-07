@@ -973,8 +973,8 @@ async def validation_request_callback(update: Update, context: ContextTypes.DEFA
     driver = get_driver(query.from_user.id)
     driver_name = driver["name"] if driver else "Unknown"
     msg_text = f"📌 طلب تحقق من الإصلاح:\nالمشكلة #{problem_id} - {problem['problem_text']}\nالمركبة: {problem['vehicle']}\nالسائق: {driver_name}\nالحالة: 📌 في انتظار التحقق"
-    sent_msg = await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_VALIDATION, text=msg_text,
-                                              reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ تم الإصلاح", callback_data=f"rug_{problem_id}")]]))
+    await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_VALIDATION, text=msg_text,
+                                   reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ تم الإصلاح", callback_data=f"rug_{problem_id}")]]))
     await query.edit_message_text("تم إرسال طلب التحقق.")
 
 # Vidange confirm / modify
@@ -1529,8 +1529,13 @@ def main():
     # Schedule jobs
     schedule_jobs(app)
 
-    # Webhook setup
+    # Initialize the application (required for webhook)
+    loop.run_until_complete(app.initialize())
+
+    # Set webhook
     loop.run_until_complete(set_webhook(app))
+
+    # Start Flask server
     port = int(os.environ.get("PORT", 5000))
     web_app.run(host="0.0.0.0", port=port)
 
