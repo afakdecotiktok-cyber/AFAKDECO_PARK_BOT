@@ -148,9 +148,9 @@ def init_db():
         conn.commit()
 
 # ----------------------------------------------------------------------
-# Cached vehicle status (for dashboard speed) – FIXED
+# Cached vehicle status (fixed)
 # ----------------------------------------------------------------------
-vehicle_cache = {}          # vehicle -> {"status": str, "open_count": int, "remaining_km": int|None}
+vehicle_cache = {}
 cache_dirty = set()
 
 def invalidate_cache(vehicle: str):
@@ -160,8 +160,7 @@ def invalidate_cache(vehicle: str):
 def refresh_cache(vehicle: str):
     with db_connection() as conn:
         cur = conn.cursor()
-        last_km = None  # <-- fixed: initialize before any branch
-        # status
+        last_km = None
         cur.execute("SELECT COUNT(*) FROM problems WHERE vehicle=%s AND status='قيد الانتظار' AND ruglee != 'تم الإصلاح'", (vehicle,))
         if cur.fetchone()[0] > 0:
             status = 'bad'
@@ -178,10 +177,8 @@ def refresh_cache(vehicle: str):
                     status = 'en_cours'
                 else:
                     status = 'good'
-        # open_count
         cur.execute("SELECT COUNT(*) FROM problems WHERE vehicle=%s AND ruglee != 'تم الإصلاح'", (vehicle,))
         open_count = cur.fetchone()[0]
-        # remaining_km
         if last_km and last_vid > 0:
             remaining = (last_vid + 10000) - last_km
         else:
@@ -223,7 +220,7 @@ def get_last_vidange_km_noconn(conn, vehicle: str) -> int:
     return row[0] if row else 0
 
 # ----------------------------------------------------------------------
-# Database functions (using context manager)
+# Database functions (unchanged)
 # ----------------------------------------------------------------------
 def get_driver(user_id: int) -> dict | None:
     with db_connection() as conn:
@@ -661,7 +658,7 @@ async def cancel_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text("تم الإلغاء.")
 
 # ----------------------------------------------------------------------
-# Core handlers (start, handle_text, handle_media)
+# Core handlers
 # ----------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -756,7 +753,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # State machine
     if state == "name_entry":
-        # Validate name (alphanumeric + spaces, allow Arabic letters)
+        # Validate name
         allowed = True
         for c in text:
             if not (c.isalnum() or c.isspace() or ('\u0600' <= c <= '\u06ff') or c in '-ء'):
@@ -766,10 +763,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ الاسم يجب أن يحتوي على أحرف وأرقام ومسافات فقط. أعد الإدخال.",
                                             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]]))
             return
+        # If driver already has a vehicle, this is a name change, not initial registration
+        if driver and driver.get("vehicle"):
+            set_driver(user_id, name=text, state="idle")
+            await update.message.reply_text(f"تم تغيير الاسم إلى {text}.", reply_markup=MAIN_KEYBOARD)
+            return
+        # Otherwise, initial registration
         set_driver(user_id, name=text, state="vehicle_selection")
         vehicles = get_all_vehicles()
         await update.message.reply_text("تم حفظ الاسم. اختر مركبتك:", reply_markup=vehicle_inline_keyboard(vehicles, "selv_"))
         return
+
     if state == "vehicle_selection":
         vehicles = get_all_vehicles()
         await update.message.reply_text("الرجاء اختيار المركبة من القائمة:", reply_markup=vehicle_inline_keyboard(vehicles, "selv_"))
@@ -893,7 +897,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("تم إرسال الشكوى.", reply_markup=MAIN_KEYBOARD)
 
 # ----------------------------------------------------------------------
-# Callback handlers
+# Callback handlers (modified)
 # ----------------------------------------------------------------------
 async def vehicle_selection_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1026,7 +1030,6 @@ async def validation_request_callback(update: Update, context: ContextTypes.DEFA
     context.bot_data.setdefault("validation_msgs", {})[problem_id] = sent_msg.message_id
     await query.edit_message_text("تم إرسال طلب التحقق.")
 
-# Validation repair callback (used only by validation messages)
 async def valrug_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1041,7 +1044,6 @@ async def valrug_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_ruglee = "تم الإصلاح" if problem["ruglee"] == "غير مُصلح" else "غير مُصلح"
     update_problem_status(problem_id, ruglee=new_ruglee)
     await _update_problem_message(problem, ruglee=new_ruglee)
-    # Replace buttons with post-validation actions
     post_markup = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔒 إغلاق الطلب", callback_data=f"close_val_{problem_id}"),
          InlineKeyboardButton("🔄 إعادة فتح", callback_data=f"reopen_val_{problem_id}")]
@@ -1371,6 +1373,13 @@ async def cancel_name_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     set_driver(query.from_user.id, state="idle")
     await query.edit_message_text("تم إلغاء تغيير الاسم.")
 
+# NEW: Change vehicle settings callback
+async def settings_change_vehicle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    vehicles = get_all_vehicles()
+    await query.edit_message_text("اختر مركبتك الجديدة:", reply_markup=vehicle_inline_keyboard(vehicles, "selv_"))
+
 # Help video commands
 async def set_help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS: return
@@ -1450,10 +1459,14 @@ async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         await update.message.reply_text("تم إرسال لوحة القيادة.")
 
+# FIXED: admin_dash now uses the thread_id from the callback message, falling back to TOPIC_GENERAL
 async def admin_dash(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    await _send_dashboard(ADMIN_GROUP_ID, TOPIC_GENERAL)
+    thread_id = query.message.message_thread_id if query.message else None
+    if not thread_id:
+        thread_id = TOPIC_GENERAL
+    await _send_dashboard(ADMIN_GROUP_ID, thread_id)
     await query.edit_message_text("تم إرسال لوحة القيادة.")
 
 async def scheduled_dashboard(context: ContextTypes.DEFAULT_TYPE):
@@ -1599,7 +1612,6 @@ async def vehicle_history_callback(update: Update, context: ContextTypes.DEFAULT
     if problems:
         text += "\n📋 المشاكل:\n"
         for p in problems:
-            # Clickable link to the original message
             link = f"https://t.me/c/{str(ADMIN_GROUP_ID)[4:]}/{p['group_message_id']}" if p['group_message_id'] else "#"
             text += f"  <a href='{link}'>#{p['id']}</a> | {p['date']} | {p['problem_text'][:40]} | {status_icon_and_text(p)}\n"
     else:
@@ -1709,6 +1721,7 @@ async def main():
     app.add_handler(CallbackQueryHandler(settings_history_callback, pattern="^settings_history$"))
     app.add_handler(CallbackQueryHandler(settings_change_name, pattern="^settings_change_name$"))
     app.add_handler(CallbackQueryHandler(cancel_name_callback, pattern="^cancel_name$"))
+    app.add_handler(CallbackQueryHandler(settings_change_vehicle, pattern="^settings_change_veh$"))  # NEW
     app.add_handler(CallbackQueryHandler(delete_help_video_callback, pattern="^delhelp_"))
     app.add_handler(CallbackQueryHandler(admin_addveh, pattern="^admin_addveh$"))
     app.add_handler(CallbackQueryHandler(admin_remveh, pattern="^admin_remveh$"))
