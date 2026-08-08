@@ -2,8 +2,10 @@ import os, sys, logging, asyncio
 from datetime import datetime, time, timedelta
 from io import BytesIO
 from zoneinfo import ZoneInfo
+from contextlib import contextmanager
 
 import psycopg2, psycopg2.extras
+from psycopg2.pool import ThreadedConnectionPool
 from aiohttp import web
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
@@ -48,351 +50,372 @@ if ADMIN_IDS_STR:
 TZ = ZoneInfo("Africa/Algiers")
 
 # ----------------------------------------------------------------------
-# PostgreSQL helper
+# Connection pool
 # ----------------------------------------------------------------------
+pool = None
 def get_conn():
-    return psycopg2.connect(DATABASE_URL, sslmode='require')
+    global pool
+    if pool is None:
+        pool = ThreadedConnectionPool(2, 4, DATABASE_URL, sslmode='require')
+    return pool.getconn()
 
+def put_conn(conn):
+    global pool
+    if pool:
+        pool.putconn(conn)
+
+@contextmanager
+def db_connection():
+    conn = get_conn()
+    try:
+        yield conn
+    finally:
+        put_conn(conn)
+
+# ----------------------------------------------------------------------
+# Database initialization
+# ----------------------------------------------------------------------
 def init_db():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS drivers (
-            user_id BIGINT PRIMARY KEY,
-            name TEXT,
-            vehicle TEXT,
-            state TEXT,
-            approval_status TEXT DEFAULT 'pending'
-        )
-    ''')
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS vehicles (
-            code TEXT PRIMARY KEY
-        )
-    ''')
-    cur.execute("SELECT COUNT(*) FROM vehicles")
-    if cur.fetchone()[0] == 0:
-        for v in ["F01","F02","H01"] + [f"M{i:02d}" for i in range(1,32)] + ["LOGAN"]:
-            cur.execute("INSERT INTO vehicles (code) VALUES (%s) ON CONFLICT DO NOTHING", (v,))
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS problems (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT,
-            driver_name TEXT,
-            vehicle TEXT,
-            problem_text TEXT,
-            media_type TEXT,
-            date TEXT,
-            status TEXT DEFAULT 'قيد الانتظار',
-            ruglee TEXT DEFAULT 'غير مُصلح',
-            comments TEXT DEFAULT '',
-            validation_requester BIGINT DEFAULT 0,
-            group_message_id BIGINT DEFAULT 0
-        )
-    ''')
-    cur.execute("ALTER TABLE problems ADD COLUMN IF NOT EXISTS validation_requester BIGINT DEFAULT 0")
-    cur.execute("ALTER TABLE problems ADD COLUMN IF NOT EXISTS group_message_id BIGINT DEFAULT 0")
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS allowed_users (
-            user_id BIGINT PRIMARY KEY,
-            status TEXT DEFAULT 'approved'
-        )
-    ''')
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS help_videos (
-            id SERIAL PRIMARY KEY,
-            file_id TEXT,
-            description TEXT DEFAULT ''
-        )
-    ''')
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS km_readings (
-            id SERIAL PRIMARY KEY,
-            vehicle TEXT,
-            km INTEGER,
-            date TEXT,
-            driver_name TEXT DEFAULT ''
-        )
-    ''')
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS vehicle_vidange (
-            vehicle TEXT PRIMARY KEY,
-            last_vidange_km INTEGER DEFAULT 0
-        )
-    ''')
-    cur.execute("SELECT code FROM vehicles")
-    for v in [r[0] for r in cur.fetchall()]:
-        cur.execute("INSERT INTO vehicle_vidange (vehicle, last_vidange_km) VALUES (%s, 0) ON CONFLICT DO NOTHING", (v,))
-    conn.commit()
-    cur.close()
-    conn.close()
+    with db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS drivers (
+                user_id BIGINT PRIMARY KEY,
+                name TEXT,
+                vehicle TEXT,
+                state TEXT,
+                approval_status TEXT DEFAULT 'pending'
+            )
+        ''')
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS vehicles (
+                code TEXT PRIMARY KEY
+            )
+        ''')
+        cur.execute("SELECT COUNT(*) FROM vehicles")
+        if cur.fetchone()[0] == 0:
+            for v in ["F01","F02","H01"] + [f"M{i:02d}" for i in range(1,32)] + ["LOGAN"]:
+                cur.execute("INSERT INTO vehicles (code) VALUES (%s) ON CONFLICT DO NOTHING", (v,))
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS problems (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                driver_name TEXT,
+                vehicle TEXT,
+                problem_text TEXT,
+                media_type TEXT,
+                date TEXT,
+                status TEXT DEFAULT 'قيد الانتظار',
+                ruglee TEXT DEFAULT 'غير مُصلح',
+                comments TEXT DEFAULT '',
+                validation_requester BIGINT DEFAULT 0,
+                group_message_id BIGINT DEFAULT 0
+            )
+        ''')
+        cur.execute("ALTER TABLE problems ADD COLUMN IF NOT EXISTS validation_requester BIGINT DEFAULT 0")
+        cur.execute("ALTER TABLE problems ADD COLUMN IF NOT EXISTS group_message_id BIGINT DEFAULT 0")
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS allowed_users (
+                user_id BIGINT PRIMARY KEY,
+                status TEXT DEFAULT 'approved'
+            )
+        ''')
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS help_videos (
+                id SERIAL PRIMARY KEY,
+                file_id TEXT,
+                description TEXT DEFAULT ''
+            )
+        ''')
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS km_readings (
+                id SERIAL PRIMARY KEY,
+                vehicle TEXT,
+                km INTEGER,
+                date TEXT,
+                driver_name TEXT DEFAULT ''
+            )
+        ''')
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS vehicle_vidange (
+                vehicle TEXT PRIMARY KEY,
+                last_vidange_km INTEGER DEFAULT 0
+            )
+        ''')
+        cur.execute("SELECT code FROM vehicles")
+        for v in [r[0] for r in cur.fetchall()]:
+            cur.execute("INSERT INTO vehicle_vidange (vehicle, last_vidange_km) VALUES (%s, 0) ON CONFLICT DO NOTHING", (v,))
+        conn.commit()
 
 # ----------------------------------------------------------------------
-# Database functions (unchanged)
+# Cached vehicle status (for dashboard speed)
 # ----------------------------------------------------------------------
-def get_driver(user_id: int) -> dict | None:
-    conn = get_conn()
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT name, vehicle, state, approval_status FROM drivers WHERE user_id = %s", (user_id,))
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
-    return dict(row) if row else None
+vehicle_cache = {}          # vehicle -> {"status": str, "open_count": int, "remaining_km": int|None}
+cache_dirty = set()
 
-def set_driver(user_id: int, name=None, vehicle=None, state=None, approval_status=None):
-    conn = get_conn()
-    cur = conn.cursor()
-    driver = get_driver(user_id)
-    if driver:
-        if name is not None:
-            cur.execute("UPDATE drivers SET name=%s WHERE user_id=%s", (name, user_id))
-        if vehicle is not None:
-            cur.execute("UPDATE drivers SET vehicle=%s WHERE user_id=%s", (vehicle, user_id))
-        if state is not None:
-            cur.execute("UPDATE drivers SET state=%s WHERE user_id=%s", (state, user_id))
-        if approval_status is not None:
-            cur.execute("UPDATE drivers SET approval_status=%s WHERE user_id=%s", (approval_status, user_id))
-    else:
-        cur.execute("INSERT INTO drivers (user_id, name, vehicle, state, approval_status) VALUES (%s,%s,%s,%s,%s)",
-                    (user_id, name or "", vehicle or "", state or "name_entry", approval_status or "pending"))
-    conn.commit()
-    cur.close()
-    conn.close()
+def invalidate_cache(vehicle: str):
+    cache_dirty.add(vehicle)
+    vehicle_cache.pop(vehicle, None)
 
-def get_all_vehicles():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT code FROM vehicles ORDER BY code")
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return [r[0] for r in rows]
+def refresh_cache(vehicle: str):
+    with db_connection() as conn:
+        cur = conn.cursor()
+        # status
+        cur.execute("SELECT COUNT(*) FROM problems WHERE vehicle=%s AND status='قيد الانتظار' AND ruglee != 'تم الإصلاح'", (vehicle,))
+        if cur.fetchone()[0] > 0:
+            status = 'bad'
+        else:
+            cur.execute("SELECT km FROM km_readings WHERE vehicle=%s ORDER BY date DESC LIMIT 1", (vehicle,))
+            last_km = cur.fetchone()
+            last_km = last_km[0] if last_km else None
+            last_vid = get_last_vidange_km_noconn(conn, vehicle)
+            if last_km and last_vid > 0 and last_km >= last_vid + 9500:
+                status = 'bad'
+            else:
+                cur.execute("SELECT COUNT(*) FROM problems WHERE vehicle=%s AND status='قيد التصليح' AND ruglee != 'تم الإصلاح'", (vehicle,))
+                if cur.fetchone()[0] > 0:
+                    status = 'en_cours'
+                else:
+                    status = 'good'
+        # open_count
+        cur.execute("SELECT COUNT(*) FROM problems WHERE vehicle=%s AND ruglee != 'تم الإصلاح'", (vehicle,))
+        open_count = cur.fetchone()[0]
+        # remaining_km
+        if last_km and last_vid > 0:
+            remaining = (last_vid + 10000) - last_km
+        else:
+            remaining = None
+        vehicle_cache[vehicle] = {
+            "status": status,
+            "open_count": open_count,
+            "remaining_km": remaining
+        }
 
-def add_vehicle(code: str):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("INSERT INTO vehicles (code) VALUES (%s) ON CONFLICT DO NOTHING", (code,))
-    cur.execute("INSERT INTO vehicle_vidange (vehicle, last_vidange_km) VALUES (%s, 0) ON CONFLICT DO NOTHING", (code,))
-    conn.commit()
-    cur.close()
-    conn.close()
+def get_vehicle_status_cached(vehicle: str) -> str:
+    if vehicle in cache_dirty:
+        refresh_cache(vehicle)
+        cache_dirty.discard(vehicle)
+    if vehicle not in vehicle_cache:
+        refresh_cache(vehicle)
+    return vehicle_cache[vehicle]["status"]
 
-def remove_vehicle(code: str):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM vehicles WHERE code=%s", (code,))
-    conn.commit()
-    cur.close()
-    conn.close()
+def count_open_problems_cached(vehicle: str) -> int:
+    if vehicle in cache_dirty:
+        refresh_cache(vehicle)
+        cache_dirty.discard(vehicle)
+    if vehicle not in vehicle_cache:
+        refresh_cache(vehicle)
+    return vehicle_cache[vehicle]["open_count"]
 
-def add_problem(user_id: int, driver_name: str, vehicle: str, problem_text: str, media_type: str, group_msg_id: int = 0) -> int:
-    conn = get_conn()
-    cur = conn.cursor()
-    date = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
-    cur.execute(
-        "INSERT INTO problems (user_id, driver_name, vehicle, problem_text, media_type, date, group_message_id) VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id",
-        (user_id, driver_name, vehicle, problem_text, media_type, date, group_msg_id)
-    )
-    problem_id = cur.fetchone()[0]
-    conn.commit()
-    cur.close()
-    conn.close()
-    return problem_id
+def get_remaining_km_cached(vehicle: str) -> int | None:
+    if vehicle in cache_dirty:
+        refresh_cache(vehicle)
+        cache_dirty.discard(vehicle)
+    if vehicle not in vehicle_cache:
+        refresh_cache(vehicle)
+    return vehicle_cache[vehicle]["remaining_km"]
 
-def update_problem_status(problem_id: int, status=None, ruglee=None, validation_requester=None, group_message_id=None):
-    conn = get_conn()
-    cur = conn.cursor()
-    if status is not None:
-        cur.execute("UPDATE problems SET status=%s WHERE id=%s", (status, problem_id))
-    if ruglee is not None:
-        cur.execute("UPDATE problems SET ruglee=%s WHERE id=%s", (ruglee, problem_id))
-    if validation_requester is not None:
-        cur.execute("UPDATE problems SET validation_requester=%s WHERE id=%s", (validation_requester, problem_id))
-    if group_message_id is not None:
-        cur.execute("UPDATE problems SET group_message_id=%s WHERE id=%s", (group_message_id, problem_id))
-    conn.commit()
-    cur.close()
-    conn.close()
-
-def set_problem_comment(problem_id: int, comment: str):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("UPDATE problems SET comments=%s WHERE id=%s", (comment, problem_id))
-    conn.commit()
-    cur.close()
-    conn.close()
-
-def delete_problem(problem_id: int):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM problems WHERE id=%s", (problem_id,))
-    conn.commit()
-    cur.close()
-    conn.close()
-
-def get_problem(problem_id: int) -> dict | None:
-    conn = get_conn()
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT * FROM problems WHERE id=%s", (problem_id,))
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
-    return dict(row) if row else None
-
-def get_all_problems():
-    conn = get_conn()
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT * FROM problems ORDER BY date DESC")
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return [dict(r) for r in rows]
-
-def get_driver_problems(user_id: int, status_filter: str = None) -> list:
-    conn = get_conn()
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    if status_filter:
-        cur.execute("SELECT * FROM problems WHERE user_id=%s AND status=%s ORDER BY date DESC", (user_id, status_filter))
-    else:
-        cur.execute("SELECT * FROM problems WHERE user_id=%s ORDER BY date DESC", (user_id,))
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return [dict(r) for r in rows]
-
-def add_km_reading(vehicle: str, km: int, driver_name: str = ""):
-    conn = get_conn()
-    cur = conn.cursor()
-    date = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
-    cur.execute("INSERT INTO km_readings (vehicle, km, date, driver_name) VALUES (%s,%s,%s,%s)", (vehicle, km, date, driver_name))
-    conn.commit()
-    cur.close()
-    conn.close()
-
-def get_latest_km(vehicle: str) -> int | None:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT km FROM km_readings WHERE vehicle=%s ORDER BY date DESC LIMIT 1", (vehicle,))
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
-    return row[0] if row else None
-
-def get_last_vidange_km(vehicle: str) -> int:
-    conn = get_conn()
+def get_last_vidange_km_noconn(conn, vehicle: str) -> int:
     cur = conn.cursor()
     cur.execute("SELECT last_vidange_km FROM vehicle_vidange WHERE vehicle=%s", (vehicle,))
     row = cur.fetchone()
-    cur.close()
-    conn.close()
     return row[0] if row else 0
 
+# ----------------------------------------------------------------------
+# Database functions (using context manager)
+# ----------------------------------------------------------------------
+def get_driver(user_id: int) -> dict | None:
+    with db_connection() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT name, vehicle, state, approval_status FROM drivers WHERE user_id = %s", (user_id,))
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+def set_driver(user_id: int, name=None, vehicle=None, state=None, approval_status=None):
+    with db_connection() as conn:
+        cur = conn.cursor()
+        driver = get_driver(user_id)
+        if driver:
+            if name is not None:
+                cur.execute("UPDATE drivers SET name=%s WHERE user_id=%s", (name, user_id))
+            if vehicle is not None:
+                cur.execute("UPDATE drivers SET vehicle=%s WHERE user_id=%s", (vehicle, user_id))
+            if state is not None:
+                cur.execute("UPDATE drivers SET state=%s WHERE user_id=%s", (state, user_id))
+            if approval_status is not None:
+                cur.execute("UPDATE drivers SET approval_status=%s WHERE user_id=%s", (approval_status, user_id))
+        else:
+            cur.execute("INSERT INTO drivers (user_id, name, vehicle, state, approval_status) VALUES (%s,%s,%s,%s,%s)",
+                        (user_id, name or "", vehicle or "", state or "name_entry", approval_status or "pending"))
+        conn.commit()
+
+def get_all_vehicles():
+    with db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT code FROM vehicles ORDER BY code")
+        rows = cur.fetchall()
+        return [r[0] for r in rows]
+
+def add_vehicle(code: str):
+    with db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO vehicles (code) VALUES (%s) ON CONFLICT DO NOTHING", (code,))
+        cur.execute("INSERT INTO vehicle_vidange (vehicle, last_vidange_km) VALUES (%s, 0) ON CONFLICT DO NOTHING", (code,))
+        conn.commit()
+
+def remove_vehicle(code: str):
+    with db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM vehicles WHERE code=%s", (code,))
+        conn.commit()
+    invalidate_cache(code)
+
+def add_problem(user_id: int, driver_name: str, vehicle: str, problem_text: str, media_type: str, group_msg_id: int = 0) -> int:
+    with db_connection() as conn:
+        cur = conn.cursor()
+        date = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
+        cur.execute(
+            "INSERT INTO problems (user_id, driver_name, vehicle, problem_text, media_type, date, group_message_id) VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+            (user_id, driver_name, vehicle, problem_text, media_type, date, group_msg_id)
+        )
+        problem_id = cur.fetchone()[0]
+        conn.commit()
+    invalidate_cache(vehicle)
+    return problem_id
+
+def update_problem_status(problem_id: int, status=None, ruglee=None, validation_requester=None, group_message_id=None):
+    with db_connection() as conn:
+        cur = conn.cursor()
+        if status is not None:
+            cur.execute("UPDATE problems SET status=%s WHERE id=%s", (status, problem_id))
+        if ruglee is not None:
+            cur.execute("UPDATE problems SET ruglee=%s WHERE id=%s", (ruglee, problem_id))
+        if validation_requester is not None:
+            cur.execute("UPDATE problems SET validation_requester=%s WHERE id=%s", (validation_requester, problem_id))
+        if group_message_id is not None:
+            cur.execute("UPDATE problems SET group_message_id=%s WHERE id=%s", (group_message_id, problem_id))
+        conn.commit()
+    problem = get_problem(problem_id)
+    if problem:
+        invalidate_cache(problem["vehicle"])
+
+def set_problem_comment(problem_id: int, comment: str):
+    with db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE problems SET comments=%s WHERE id=%s", (comment, problem_id))
+        conn.commit()
+
+def delete_problem(problem_id: int):
+    problem = get_problem(problem_id)
+    with db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM problems WHERE id=%s", (problem_id,))
+        conn.commit()
+    if problem:
+        invalidate_cache(problem["vehicle"])
+
+def get_problem(problem_id: int) -> dict | None:
+    with db_connection() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT * FROM problems WHERE id=%s", (problem_id,))
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+def get_all_problems():
+    with db_connection() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT * FROM problems ORDER BY date DESC")
+        rows = cur.fetchall()
+        return [dict(r) for r in rows]
+
+def get_driver_problems(user_id: int, status_filter: str = None) -> list:
+    with db_connection() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        if status_filter:
+            cur.execute("SELECT * FROM problems WHERE user_id=%s AND status=%s ORDER BY date DESC", (user_id, status_filter))
+        else:
+            cur.execute("SELECT * FROM problems WHERE user_id=%s ORDER BY date DESC", (user_id,))
+        rows = cur.fetchall()
+        return [dict(r) for r in rows]
+
+def add_km_reading(vehicle: str, km: int, driver_name: str = ""):
+    with db_connection() as conn:
+        cur = conn.cursor()
+        date = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
+        cur.execute("INSERT INTO km_readings (vehicle, km, date, driver_name) VALUES (%s,%s,%s,%s)", (vehicle, km, date, driver_name))
+        conn.commit()
+    invalidate_cache(vehicle)
+
+def get_latest_km(vehicle: str) -> int | None:
+    with db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT km FROM km_readings WHERE vehicle=%s ORDER BY date DESC LIMIT 1", (vehicle,))
+        row = cur.fetchone()
+        return row[0] if row else None
+
+def get_last_vidange_km(vehicle: str) -> int:
+    with db_connection() as conn:
+        return get_last_vidange_km_noconn(conn, vehicle)
+
 def set_last_vidange_km(vehicle: str, km: int):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("UPDATE vehicle_vidange SET last_vidange_km=%s WHERE vehicle=%s", (km, vehicle))
-    conn.commit()
-    cur.close()
-    conn.close()
+    with db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE vehicle_vidange SET last_vidange_km=%s WHERE vehicle=%s", (km, vehicle))
+        conn.commit()
+    invalidate_cache(vehicle)
 
 def has_active_vidange(vehicle: str) -> bool:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT id FROM problems WHERE vehicle=%s AND media_type='نظام' AND ruglee != 'تم الإصلاح'", (vehicle,))
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
-    return row is not None
-
-def get_vehicle_status(vehicle: str) -> str:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM problems WHERE vehicle=%s AND status='قيد الانتظار' AND ruglee != 'تم الإصلاح'", (vehicle,))
-    if cur.fetchone()[0] > 0: return 'bad'
-    last_km = get_latest_km(vehicle)
-    if last_km:
-        last_vid = get_last_vidange_km(vehicle)
-        if last_vid > 0 and last_km >= last_vid + 9500: return 'bad'
-    cur.execute("SELECT COUNT(*) FROM problems WHERE vehicle=%s AND status='قيد التصليح' AND ruglee != 'تم الإصلاح'", (vehicle,))
-    if cur.fetchone()[0] > 0: return 'en_cours'
-    return 'good'
-
-def count_open_problems(vehicle: str) -> int:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM problems WHERE vehicle=%s AND ruglee != 'تم الإصلاح'", (vehicle,))
-    cnt = cur.fetchone()[0]
-    cur.close()
-    conn.close()
-    return cnt
-
-def get_remaining_km(vehicle: str) -> int | str:
-    last_km = get_latest_km(vehicle)
-    if last_km:
-        last_vid = get_last_vidange_km(vehicle)
-        if last_vid > 0:
-            return (last_vid + 10000) - last_km
-    return "—"
+    with db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM problems WHERE vehicle=%s AND media_type='نظام' AND ruglee != 'تم الإصلاح'", (vehicle,))
+        row = cur.fetchone()
+        return row is not None
 
 def add_help_video(file_id: str, description: str = ""):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("INSERT INTO help_videos (file_id, description) VALUES (%s,%s)", (file_id, description))
-    conn.commit()
-    cur.close()
-    conn.close()
+    with db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO help_videos (file_id, description) VALUES (%s,%s)", (file_id, description))
+        conn.commit()
 
 def get_all_help_videos():
-    conn = get_conn()
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT * FROM help_videos ORDER BY id DESC")
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return [dict(r) for r in rows]
+    with db_connection() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT * FROM help_videos ORDER BY id DESC")
+        rows = cur.fetchall()
+        return [dict(r) for r in rows]
 
 def delete_help_video(video_id: int):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM help_videos WHERE id=%s", (video_id,))
-    conn.commit()
-    cur.close()
-    conn.close()
+    with db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM help_videos WHERE id=%s", (video_id,))
+        conn.commit()
 
 def add_allowed_user(user_id: int, status: str = "approved"):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("INSERT INTO allowed_users (user_id, status) VALUES (%s,%s) ON CONFLICT (user_id) DO UPDATE SET status=%s", (user_id, status, status))
-    conn.commit()
-    cur.close()
-    conn.close()
+    with db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO allowed_users (user_id, status) VALUES (%s,%s) ON CONFLICT (user_id) DO UPDATE SET status=%s", (user_id, status, status))
+        conn.commit()
 
 def is_allowed(user_id: int) -> bool:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT status FROM allowed_users WHERE user_id=%s", (user_id,))
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
-    return row is not None and row[0] == 'approved'
+    with db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT status FROM allowed_users WHERE user_id=%s", (user_id,))
+        row = cur.fetchone()
+        return row is not None and row[0] == 'approved'
 
 def get_all_drivers():
-    conn = get_conn()
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT user_id, name, vehicle FROM drivers WHERE approval_status='approved'")
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return [dict(r) for r in rows]
+    with db_connection() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT user_id, name, vehicle FROM drivers WHERE approval_status='approved'")
+        rows = cur.fetchall()
+        return [dict(r) for r in rows]
 
 def remove_driver(user_id: int):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM drivers WHERE user_id=%s", (user_id,))
-    cur.execute("DELETE FROM allowed_users WHERE user_id=%s", (user_id,))
-    conn.commit()
-    cur.close()
-    conn.close()
+    with db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM drivers WHERE user_id=%s", (user_id,))
+        cur.execute("DELETE FROM allowed_users WHERE user_id=%s", (user_id,))
+        conn.commit()
 
 # ----------------------------------------------------------------------
 # Excel generation
@@ -438,16 +461,14 @@ def generate_vidange_excel(vehicle_code: str = None) -> BytesIO:
     for v in vehicles:
         ws = wb.create_sheet(title=v)
         ws.append(["التاريخ", "السائق", "العداد الحالي (KM)", "آخر فيدانج (KM)", "المسافة المتبقية للفيدانج"])
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT date, km, driver_name FROM km_readings WHERE vehicle=%s ORDER BY date DESC", (v,))
-        readings = cur.fetchall()
+        with db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT date, km, driver_name FROM km_readings WHERE vehicle=%s ORDER BY date DESC", (v,))
+            readings = cur.fetchall()
         last_km = get_last_vidange_km(v)
         for date_str, km, dname in readings:
             remaining = (last_km + 10000) - km if last_km > 0 else "—"
             ws.append([date_str, dname or "", km, last_km, remaining])
-        cur.close()
-        conn.close()
         for col in ws.columns:
             max_len = max((len(str(c.value)) for c in col if c.value), default=0)
             ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_len+2, 50)
@@ -472,18 +493,18 @@ def vehicle_inline_keyboard(vehicles: list, prefix="selv_") -> InlineKeyboardMar
     buttons = [InlineKeyboardButton(v, callback_data=f"{prefix}{v}") for v in vehicles]
     return InlineKeyboardMarkup([buttons[i:i+4] for i in range(0, len(buttons), 4)])
 
-def status_emoji(vehicle: str) -> str:
-    s = get_vehicle_status(vehicle)
+def status_emoji_cached(vehicle: str) -> str:
+    s = get_vehicle_status_cached(vehicle)
     if s == 'bad': return "🔴"
     if s == 'en_cours': return "🟠"
     return "🟢"
 
 def dashboard_button_text(vehicle: str) -> str:
-    emoji = status_emoji(vehicle)
-    cnt = count_open_problems(vehicle)
-    rem = get_remaining_km(vehicle)
+    emoji = status_emoji_cached(vehicle)
+    cnt = count_open_problems_cached(vehicle)
+    rem = get_remaining_km_cached(vehicle)
     line1 = f"{emoji} {vehicle} ({cnt})"
-    line2 = f"   {rem} كم" if isinstance(rem, int) else "   —"
+    line2 = f"   {rem} كم" if rem is not None else "   —"
     return f"{line1}\n{line2}"
 
 def admin_main_keyboard() -> InlineKeyboardMarkup:
@@ -639,7 +660,7 @@ async def cancel_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text("تم الإلغاء.")
 
 # ----------------------------------------------------------------------
-# Core handlers
+# Core handlers (start, handle_text, handle_media)
 # ----------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -664,12 +685,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
-
     user_id = update.effective_user.id
     text = update.message.text.strip()
     driver = get_driver(user_id)
     state = driver["state"] if driver else "name_entry"
 
+    # Block non-allowed users
     if user_id not in ADMIN_IDS and not is_allowed(user_id):
         if state == "name_entry":
             set_driver(user_id, name=text, state="awaiting_approval", approval_status="pending")
@@ -691,12 +712,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("غير مصرح لك باستخدام البوت حالياً.")
             return
 
+    # Comment session
     if context.user_data.get("awaiting_comment"):
         problem_id = context.user_data.pop("awaiting_comment")
         set_problem_comment(problem_id, text)
         await update.message.reply_text("✅ تم حفظ التعليق بنجاح.", reply_markup=MAIN_KEYBOARD)
         return
 
+    # KM after vidange repair
     if context.user_data.get("await_km"):
         vehicle = context.user_data["await_km_vehicle"]
         if text.isdigit():
@@ -730,7 +753,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]]))
             return
 
+    # State machine
     if state == "name_entry":
+        # Validate name (alphanumeric + spaces, allow Arabic letters)
+        allowed = True
+        for c in text:
+            if not (c.isalnum() or c.isspace() or ('\u0600' <= c <= '\u06ff') or c in '-ء'):
+                allowed = False
+                break
+        if not text or not allowed:
+            await update.message.reply_text("⚠️ الاسم يجب أن يحتوي على أحرف وأرقام ومسافات فقط. أعد الإدخال.",
+                                            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]]))
+            return
         set_driver(user_id, name=text, state="vehicle_selection")
         vehicles = get_all_vehicles()
         await update.message.reply_text("تم حفظ الاسم. اختر مركبتك:", reply_markup=vehicle_inline_keyboard(vehicles, "selv_"))
@@ -740,6 +774,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("الرجاء اختيار المركبة من القائمة:", reply_markup=vehicle_inline_keyboard(vehicles, "selv_"))
         return
 
+    # Main keyboard
     if text == "📝 تقديم شكوى":
         markup = InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]])
         await update.message.reply_text("أرسل وصف المشكلة (نص، صورة، فيديو، أو صوت).", reply_markup=markup)
@@ -775,6 +810,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("اختر الإعداد المطلوب:", reply_markup=markup)
         return
 
+    # Reclamation / km input
     if context.user_data.get("expecting_reclamation"):
         if not text:
             await update.message.reply_text("الرجاء كتابة وصف للمشكلة. لا يمكن إرسال شكوى فارغة.",
@@ -789,10 +825,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_RECLAMATIONS, text=report,
                                              reply_markup=build_problem_keyboard(0))
         problem_id = add_problem(user_id, driver["name"], driver["vehicle"], text, "", group_msg_id=msg.message_id)
-        try:
-            await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id))
-        except Exception as e:
-            logging.error(f"Failed to set initial problem keyboard: {e}")
+        await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id))
         await update.message.reply_text("تم إرسال الشكوى.", reply_markup=MAIN_KEYBOARD)
         return
     if context.user_data.get("expecting_km"):
@@ -841,30 +874,21 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = await context.bot.send_photo(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_RECLAMATIONS, photo=file_id,
                                            caption=header, reply_markup=build_problem_keyboard(0))
         problem_id = add_problem(user_id, driver["name"], driver["vehicle"], caption, media_type, group_msg_id=msg.message_id)
-        try:
-            await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id))
-        except Exception as e:
-            logging.error(f"Failed to set media problem keyboard: {e}")
+        await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id))
     elif update.message.video:
         file_id = update.message.video.file_id
         media_type = "فيديو"
         msg = await context.bot.send_video(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_RECLAMATIONS, video=file_id,
                                            caption=header, reply_markup=build_problem_keyboard(0))
         problem_id = add_problem(user_id, driver["name"], driver["vehicle"], caption, media_type, group_msg_id=msg.message_id)
-        try:
-            await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id))
-        except Exception as e:
-            logging.error(f"Failed to set media problem keyboard: {e}")
+        await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id))
     elif update.message.voice:
         file_id = update.message.voice.file_id
         media_type = "صوت"
         msg = await context.bot.send_voice(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_RECLAMATIONS, voice=file_id,
                                            caption=header, reply_markup=build_problem_keyboard(0))
         problem_id = add_problem(user_id, driver["name"], driver["vehicle"], caption, media_type, group_msg_id=msg.message_id)
-        try:
-            await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id))
-        except Exception as e:
-            logging.error(f"Failed to set media problem keyboard: {e}")
+        await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id))
     await update.message.reply_text("تم إرسال الشكوى.", reply_markup=MAIN_KEYBOARD)
 
 # ----------------------------------------------------------------------
@@ -1001,6 +1025,7 @@ async def validation_request_callback(update: Update, context: ContextTypes.DEFA
     context.bot_data.setdefault("validation_msgs", {})[problem_id] = sent_msg.message_id
     await query.edit_message_text("تم إرسال طلب التحقق.")
 
+# Validation repair callback (used only by validation messages)
 async def valrug_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1008,18 +1033,22 @@ async def valrug_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     problem = get_problem(problem_id)
     if not problem: return await query.answer("غير موجود.")
     if problem["media_type"] and not problem["comments"]:
-        await query.answer("يجب إضافة تعليق أولاً قبل تأكيد الإصلاح.", show_alert=True)
+        await query.answer("يجب إضافة تعليق أولاً.", show_alert=True)
         await context.bot.send_message(chat_id=query.from_user.id, text="يجب إضافة تعليق للمشكلة قبل وضعها كمُصلحة. أرسل التعليق هنا.")
         context.user_data["awaiting_comment"] = problem_id
         return
     new_ruglee = "تم الإصلاح" if problem["ruglee"] == "غير مُصلح" else "غير مُصلح"
     update_problem_status(problem_id, ruglee=new_ruglee)
     await _update_problem_message(problem, ruglee=new_ruglee)
+    # Replace buttons with post-validation actions
+    post_markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔒 إغلاق الطلب", callback_data=f"close_val_{problem_id}"),
+         InlineKeyboardButton("🔄 إعادة فتح", callback_data=f"reopen_val_{problem_id}")]
+    ])
     try:
-        await query.edit_message_text(
-            f"📌 طلب تحقق من الإصلاح:\nالمشكلة #{problem_id} - {problem['problem_text']}\nالمركبة: {problem['vehicle']}\nالسائق: ...\nالحالة: ✅ تم الإصلاح"
-        )
-    except: pass
+        await query.edit_message_reply_markup(reply_markup=post_markup)
+    except Exception as e:
+        logging.warning(f"Failed to update val msg markup: {e}")
     context.bot_data.get("validation_msgs", {}).pop(problem_id, None)
     if problem["media_type"] == "نظام" and new_ruglee == "تم الإصلاح":
         req_id = problem.get("validation_requester") or problem.get("user_id")
@@ -1029,6 +1058,40 @@ async def valrug_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.bot_data.setdefault("km_await", {})[req_id] = problem["vehicle"]
             except: pass
 
+async def close_val_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    problem_id = int(query.data.split("_")[2])
+    problem = get_problem(problem_id)
+    if not problem: return await query.edit_message_text("المشكلة غير موجودة.")
+    try:
+        await query.message.delete()
+    except Exception as e:
+        logging.warning(f"Could not delete val msg: {e}")
+    driver_id = problem.get("validation_requester") or problem.get("user_id")
+    if driver_id:
+        try:
+            await context.bot.send_message(chat_id=driver_id, text=f"تم إغلاق طلب التحقق للمشكلة #{problem_id}.")
+        except: pass
+
+async def reopen_val_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    problem_id = int(query.data.split("_")[2])
+    problem = get_problem(problem_id)
+    if not problem: return await query.edit_message_text("المشكلة غير موجودة.")
+    update_problem_status(problem_id, ruglee="غير مُصلح")
+    driver_id = problem.get("validation_requester") or problem.get("user_id")
+    if driver_id:
+        try:
+            await context.bot.send_message(chat_id=driver_id, text=f"تم إعادة فتح طلب التحقق للمشكلة #{problem_id}. الرجاء مراجعة الإصلاح.")
+        except: pass
+    orig_markup = InlineKeyboardMarkup([[InlineKeyboardButton("✅ تأكيد الإصلاح", callback_data=f"valrug_{problem_id}")]])
+    try:
+        await query.edit_message_reply_markup(reply_markup=orig_markup)
+    except: pass
+
+# Vidange confirm / modify
 async def vidange_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1073,9 +1136,7 @@ async def vidange_modify_callback(update: Update, context: ContextTypes.DEFAULT_
     ])
     await query.edit_message_text("✏️ أرسل القيمة الصحيحة للكيلومتر بعد الفيدانج:", reply_markup=markup)
 
-# ----------------------------------------------------------------------
 # Approval / Rejection callbacks
-# ----------------------------------------------------------------------
 async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1106,9 +1167,7 @@ async def reject_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=user_id, text="عذراً، لم يتم قبولك. يمكنك التواصل مع الإدارة.")
     except: pass
 
-# ----------------------------------------------------------------------
 # Admin submenu callbacks
-# ----------------------------------------------------------------------
 async def admin_main_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1137,12 +1196,10 @@ async def admin_export_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin_approve_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    conn = get_conn()
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT user_id, name FROM drivers WHERE approval_status='pending'")
-    pending = cur.fetchall()
-    cur.close()
-    conn.close()
+    with db_connection() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT user_id, name FROM drivers WHERE approval_status='pending'")
+        pending = cur.fetchall()
     if not pending:
         await query.edit_message_text("لا يوجد سائقون بانتظار القبول.")
         return
@@ -1189,9 +1246,7 @@ async def confirm_remove_driver_exec(update: Update, context: ContextTypes.DEFAU
         await context.bot.send_message(chat_id=user_id, text="تم إلغاء صلاحيتك لاستخدام البوت.")
     except: pass
 
-# ----------------------------------------------------------------------
 # Admin input handler
-# ----------------------------------------------------------------------
 async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in ADMIN_IDS: return
@@ -1275,9 +1330,7 @@ async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         set_last_vidange_km(code, km)
         await update.message.reply_text(f"✅ تم تعيين آخر فيدانج لـ {code} = {km} كم.")
 
-# ----------------------------------------------------------------------
 # Settings callbacks
-# ----------------------------------------------------------------------
 async def settings_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1317,9 +1370,7 @@ async def cancel_name_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     set_driver(query.from_user.id, state="idle")
     await query.edit_message_text("تم إلغاء تغيير الاسم.")
 
-# ----------------------------------------------------------------------
 # Help video commands
-# ----------------------------------------------------------------------
 async def set_help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS: return
     if not update.message.video and not update.message.reply_to_message:
@@ -1358,9 +1409,7 @@ async def delete_help_video_callback(update: Update, context: ContextTypes.DEFAU
     delete_help_video(video_id)
     await query.edit_message_text("✅ تم حذف الفيديو.")
 
-# ----------------------------------------------------------------------
 # Broadcast command (super admin only)
-# ----------------------------------------------------------------------
 async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS: return
     if not context.args:
@@ -1376,9 +1425,7 @@ async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except: pass
     await update.message.reply_text(f"تم إرسال الرسالة إلى {count} سائق.")
 
-# ----------------------------------------------------------------------
 # Dashboard functions
-# ----------------------------------------------------------------------
 async def _send_dashboard(chat_id: int, thread_id: int = None):
     vehicles = get_all_vehicles()
     if not vehicles:
@@ -1402,7 +1449,6 @@ async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         await update.message.reply_text("تم إرسال لوحة القيادة.")
 
-# Updated: allow all group members to request dashboard via button
 async def admin_dash(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1429,9 +1475,7 @@ def schedule_jobs(app: Application):
     if now >= next_sat: next_sat += timedelta(days=7)
     app.job_queue.run_repeating(weekly_excel, interval=7*24*60*60, first=next_sat)
 
-# ----------------------------------------------------------------------
 # Export functions
-# ----------------------------------------------------------------------
 async def export_problems(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file = generate_problems_excel()
     if update.message:
@@ -1454,9 +1498,7 @@ async def export_vidange_vehicle(update: Update, context: ContextTypes.DEFAULT_T
     file = generate_vidange_excel(vehicle_code=code)
     await update.message.reply_document(document=file, filename=f"فيدانج_{code}.xlsx")
 
-# ----------------------------------------------------------------------
 # Sticky admin panel command
-# ----------------------------------------------------------------------
 async def set_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         return
@@ -1473,9 +1515,7 @@ async def remove_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE)
         reply_markup=ReplyKeyboardRemove()
     )
 
-# ----------------------------------------------------------------------
 # Admin action callbacks (addveh, remveh, etc.)
-# ----------------------------------------------------------------------
 async def admin_addveh(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1548,14 +1588,12 @@ async def vehicle_history_callback(update: Update, context: ContextTypes.DEFAULT
     query = update.callback_query
     await query.answer()
     vehicle = query.data.split("_", 1)[1]
-    conn = get_conn()
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT * FROM problems WHERE vehicle=%s ORDER BY date DESC", (vehicle,))
-    problems = [dict(r) for r in cur.fetchall()]
-    cur.execute("SELECT date, km FROM km_readings WHERE vehicle=%s ORDER BY date DESC LIMIT 5", (vehicle,))
-    readings = cur.fetchall()
-    cur.close()
-    conn.close()
+    with db_connection() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT * FROM problems WHERE vehicle=%s ORDER BY date DESC", (vehicle,))
+        problems = [dict(r) for r in cur.fetchall()]
+        cur.execute("SELECT date, km FROM km_readings WHERE vehicle=%s ORDER BY date DESC LIMIT 5", (vehicle,))
+        readings = cur.fetchall()
     text = f"🚘 تاريخ المركبة {vehicle}:\n"
     if problems:
         text += "\n📋 المشاكل:\n"
@@ -1580,9 +1618,7 @@ async def done_history_callback(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception as e:
         logging.warning(f"Could not delete history message: {e}")
 
-# ----------------------------------------------------------------------
-# Command handlers for /admin, /panel, /setadminpanel, /removeadminpanel
-# ----------------------------------------------------------------------
+# Command handlers for /admin, /panel, etc.
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🕹️ لوحة التحكم:", reply_markup=admin_main_keyboard())
 
@@ -1594,15 +1630,11 @@ async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("🕹️ لوحة التحكم الكاملة:", reply_markup=admin_main_keyboard())
 
-# ----------------------------------------------------------------------
 # Error handler
-# ----------------------------------------------------------------------
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logging.error(msg="Exception while handling an update:", exc_info=context.error)
 
-# ----------------------------------------------------------------------
 # Webhook and aiohttp
-# ----------------------------------------------------------------------
 async def health(request):
     return web.Response(text="Bot is running")
 
@@ -1656,6 +1688,8 @@ async def main():
     app.add_handler(CallbackQueryHandler(cancel_delete_callback, pattern="^cancel_"))
     app.add_handler(CallbackQueryHandler(validation_request_callback, pattern="^valreq_"))
     app.add_handler(CallbackQueryHandler(valrug_callback, pattern="^valrug_"))
+    app.add_handler(CallbackQueryHandler(close_val_callback, pattern="^close_val_"))
+    app.add_handler(CallbackQueryHandler(reopen_val_callback, pattern="^reopen_val_"))
     app.add_handler(CallbackQueryHandler(vidange_confirm_callback, pattern="^vidconfirm_"))
     app.add_handler(CallbackQueryHandler(vidange_modify_callback, pattern="^vidmodify_"))
     app.add_handler(CallbackQueryHandler(approve_callback, pattern="^approve_"))
