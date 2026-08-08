@@ -148,7 +148,7 @@ def init_db():
         conn.commit()
 
 # ----------------------------------------------------------------------
-# Cached vehicle status (for dashboard speed)
+# Cached vehicle status (for dashboard speed) – FIXED
 # ----------------------------------------------------------------------
 vehicle_cache = {}          # vehicle -> {"status": str, "open_count": int, "remaining_km": int|None}
 cache_dirty = set()
@@ -160,14 +160,15 @@ def invalidate_cache(vehicle: str):
 def refresh_cache(vehicle: str):
     with db_connection() as conn:
         cur = conn.cursor()
+        last_km = None  # <-- fixed: initialize before any branch
         # status
         cur.execute("SELECT COUNT(*) FROM problems WHERE vehicle=%s AND status='قيد الانتظار' AND ruglee != 'تم الإصلاح'", (vehicle,))
         if cur.fetchone()[0] > 0:
             status = 'bad'
         else:
             cur.execute("SELECT km FROM km_readings WHERE vehicle=%s ORDER BY date DESC LIMIT 1", (vehicle,))
-            last_km = cur.fetchone()
-            last_km = last_km[0] if last_km else None
+            row = cur.fetchone()
+            last_km = row[0] if row else None
             last_vid = get_last_vidange_km_noconn(conn, vehicle)
             if last_km and last_vid > 0 and last_km >= last_vid + 9500:
                 status = 'bad'
