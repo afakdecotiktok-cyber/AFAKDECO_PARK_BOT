@@ -698,7 +698,7 @@ async def _update_problem_message(problem: dict, new_status: str = None, new_rug
         return
     new_text = update_status_line(problem, new_status=new_status, new_ruglee=new_ruglee)
     try:
-        if problem["media_type"]:
+        if problem["media_type"] and problem["media_type"] != "نظام":
             await app.bot.edit_message_caption(
                 chat_id=ADMIN_GROUP_ID,
                 message_id=problem["group_message_id"],
@@ -759,13 +759,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     user_id = update.effective_user.id
     text = update.message.text.strip()
-    driver = get_driver(user_id)
+    driver = await run_db(get_driver, user_id)
     state = driver["state"] if driver else "name_entry"
 
     # Block non-allowed users
-    if user_id not in ADMIN_IDS and not is_allowed(user_id):
+    if user_id not in ADMIN_IDS and not await run_db(is_allowed, user_id):
         if state == "name_entry":
-            set_driver(user_id, name=text, state="awaiting_approval", approval_status="pending")
+            await run_db(set_driver, user_id, name=text, state="awaiting_approval", approval_status="pending")
             username = update.effective_user.username
             mention = f"@{username}" if username else f"[{text}](tg://user?id={user_id})"
             msg = await context.bot.send_message(
@@ -787,7 +787,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Comment session
     if context.user_data.get("awaiting_comment"):
         problem_id = context.user_data.pop("awaiting_comment")
-        set_problem_comment(problem_id, text)
+        await run_db(set_problem_comment, problem_id, text)
         await update.message.reply_text("✅ تم حفظ التعليق بنجاح.", reply_markup=MAIN_KEYBOARD)
         return
 
@@ -796,7 +796,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         vehicle = context.user_data["await_km_vehicle"]
         if text.isdigit():
             km = int(text)
-            last_km = get_latest_km(vehicle)
+            last_km = await run_db(get_latest_km, vehicle)
             if last_km is not None and km <= last_km:
                 await update.message.reply_text(f"⚠️ الكيلومتر يجب أن يكون أكبر من آخر قراءة ({last_km} كم). أعد إدخال القيمة الصحيحة.",
                                                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]]))
@@ -839,17 +839,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         # If driver already has a vehicle, this is a name change, not initial registration
         if driver and driver.get("vehicle"):
-            set_driver(user_id, name=text, state="idle")
+            await run_db(set_driver, user_id, name=text, state="idle")
             await update.message.reply_text(f"تم تغيير الاسم إلى {text}.", reply_markup=MAIN_KEYBOARD)
             return
         # Otherwise, initial registration
-        set_driver(user_id, name=text, state="vehicle_selection")
-        vehicles = get_all_vehicles()
+        await run_db(set_driver, user_id, name=text, state="vehicle_selection")
+        vehicles = await run_db(get_all_vehicles)
         await update.message.reply_text("تم حفظ الاسم. اختر مركبتك:", reply_markup=vehicle_inline_keyboard(vehicles, "selv_"))
         return
 
     if state == "vehicle_selection":
-        vehicles = get_all_vehicles()
+        vehicles = await run_db(get_all_vehicles)
         await update.message.reply_text("الرجاء اختيار المركبة من القائمة:", reply_markup=vehicle_inline_keyboard(vehicles, "selv_"))
         return
 
@@ -860,7 +860,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["expecting_reclamation"] = True
         return
     if text == "✅ طلب التحقق من الإصلاح":
-        problems = get_driver_problems(user_id, status_filter="قيد التصليح")
+        problems = await run_db(get_driver_problems, user_id, "قيد التصليح")
         if not problems:
             await update.message.reply_text("لا توجد مشاكل بحاجة للتحقق من إصلاحها.", reply_markup=MAIN_KEYBOARD)
             return
@@ -903,8 +903,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         report = f"السائق: {driver['name']}\nالمركبة: {driver['vehicle']}\nالمشكلة: {text}\n{status_line}"
         msg = await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_RECLAMATIONS, text=report,
                                              reply_markup=build_problem_keyboard(0))
-        problem_id = add_problem(user_id, driver["name"], driver["vehicle"], text, "", group_msg_id=msg.message_id)
-        await msg.edit_reply_markup(reply_markup=build_problem_keyboard(problem_id))
+        problem_id = await run_db(add_problem, user_id, driver["name"], driver["vehicle"], text, "", group_msg_id=msg.message_id)
+        await msg.edit_reply_markup(reply_markup=await run_db(build_problem_keyboard, problem_id))
         await update.message.reply_text("تم إرسال الشكوى.", reply_markup=MAIN_KEYBOARD)
         return
     if context.user_data.get("expecting_km"):
@@ -917,20 +917,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not vehicle:
             await update.message.reply_text("ملف غير مكتمل.")
             return
-        last_km = get_latest_km(vehicle)
+        last_km = await run_db(get_latest_km, vehicle)
         if last_km is not None and km <= last_km:
             await update.message.reply_text(f"⚠️ الكيلومتر يجب أن يكون أكبر من آخر قراءة ({last_km} كم). أعد إدخال القيمة الصحيحة.",
                                             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]]))
             return
         context.user_data.pop("expecting_km")
-        add_km_reading(vehicle, km, driver_name=driver["name"])
-        last_vid = get_last_vidange_km(vehicle)
-        if last_vid > 0 and km >= last_vid + 9000 and not has_active_vidange(vehicle):
-            vidange_problem_id = add_problem(user_id, f"{driver['name']} (نظام)", vehicle, f"Vidange {vehicle}", "نظام")
+        await run_db(add_km_reading, vehicle, km, driver_name=driver["name"])
+        last_vid = await run_db(get_last_vidange_km, vehicle)
+        if last_vid > 0 and km >= last_vid + 9000 and not await run_db(has_active_vidange, vehicle):
+            vidange_problem_id = await run_db(add_problem, user_id, f"{driver['name']} (نظام)", vehicle, f"Vidange {vehicle}", "نظام")
             await context.bot.send_message(
                 chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_VIDANGE,
                 text=f"⚠️ تنبيه فيدانج: المركبة {vehicle}\nالعداد الحالي: {km} كم\nآخر فيدانج: {last_vid} كم\n⚪ الحالة: قيد الانتظار",
-                reply_markup=build_problem_keyboard(vidange_problem_id)
+                reply_markup=await run_db(build_problem_keyboard, vidange_problem_id)
             )
         await update.message.reply_text(f"تم تسجيل العداد: {km} كم.", reply_markup=MAIN_KEYBOARD)
         return
@@ -1075,8 +1075,15 @@ async def confirm_delete_callback(update: Update, context: ContextTypes.DEFAULT_
     await query.answer()
     if query.from_user.id not in ADMIN_IDS: return
     problem_id = int(query.data.split("_")[1])
-    delete_problem(problem_id)
-    await query.edit_message_text("🗑️ تم حذف المشكلة.")
+    problem = await run_db(get_problem, problem_id)
+    await run_db(delete_problem, problem_id)
+    try:
+        if problem and problem["media_type"] and problem["media_type"] != "نظام":
+            await query.edit_message_caption(caption="🗑️ تم حذف المشكلة.")
+        else:
+            await query.edit_message_text("🗑️ تم حذف المشكلة.")
+    except Exception as e:
+        logging.warning(f"Problem #{problem_id} deleted from DB but could not edit its group message: {e}")
 
 async def cancel_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1515,7 +1522,7 @@ async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("استخدم: /broadcast <النص>")
         return
     message = " ".join(context.args)
-    drivers = get_all_drivers()
+    drivers = await run_db(get_all_drivers)
     count = 0
     for d in drivers:
         try:
@@ -1524,6 +1531,54 @@ async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logging.debug(f"Non-critical send/update failure: {e}")
     await update.message.reply_text(f"تم إرسال الرسالة إلى {count} سائق.")
+
+async def delete_problem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/delete <رمز المركبة> <رقم المشكلة> — يحذف الشكوى نهائياً من قاعدة البيانات
+    (وبالتالي لن تظهر في أي تصدير Excel لاحق، لأن الملفات تُبنى دائماً من قاعدة
+    البيانات الحية وقت الطلب ولا يوجد جدول Excel مخزَّن بشكل دائم)."""
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ هذا الأمر مخصص للمشرفين فقط.")
+        return
+    if len(context.args) != 2:
+        await update.message.reply_text("استخدم: /delete <رمز المركبة> <رقم المشكلة>\nمثال: /delete M15 42")
+        return
+    vehicle_code = context.args[0].upper()
+    try:
+        problem_id = int(context.args[1])
+    except ValueError:
+        await update.message.reply_text("رقم المشكلة يجب أن يكون رقماً صحيحاً.")
+        return
+
+    problem = await run_db(get_problem, problem_id)
+    if not problem:
+        await update.message.reply_text(f"لا توجد شكوى برقم #{problem_id}.")
+        return
+    if problem["vehicle"] != vehicle_code:
+        await update.message.reply_text(
+            f"⚠️ الشكوى #{problem_id} تخص المركبة {problem['vehicle']} وليس {vehicle_code}. "
+            "تحقق من الرمز والرقم ثم أعد المحاولة (لمنع حذف شكوى بالخطأ)."
+        )
+        return
+
+    await run_db(delete_problem, problem_id)
+
+    # محاولة تحديث/حذف الرسالة الأصلية في المجموعة الإدارية إن وُجدت
+    if problem.get("group_message_id"):
+        try:
+            if problem["media_type"] and problem["media_type"] != "نظام":
+                await context.bot.edit_message_caption(
+                    chat_id=ADMIN_GROUP_ID, message_id=problem["group_message_id"],
+                    caption="🗑️ تم حذف هذه المشكلة عبر أمر /delete."
+                )
+            else:
+                await context.bot.edit_message_text(
+                    chat_id=ADMIN_GROUP_ID, message_id=problem["group_message_id"],
+                    text="🗑️ تم حذف هذه المشكلة عبر أمر /delete."
+                )
+        except Exception as e:
+            logging.warning(f"Problem #{problem_id} deleted via /delete but could not edit its group message: {e}")
+
+    await update.message.reply_text(f"✅ تم حذف الشكوى #{problem_id} الخاصة بالمركبة {vehicle_code} نهائياً من قاعدة البيانات.")
 
 # Dashboard functions
 async def _send_dashboard(chat_id: int, thread_id: int = None):
@@ -1790,6 +1845,7 @@ async def main():
     app.add_handler(CommandHandler("sethelp", set_help_cmd))
     app.add_handler(CommandHandler("removehelp", remove_help_cmd))
     app.add_handler(CommandHandler("broadcast", broadcast_cmd))
+    app.add_handler(CommandHandler("delete", delete_problem_cmd))
     app.add_handler(CommandHandler("export", export_problems))
     app.add_handler(CommandHandler("export_vidange", export_vidange))
     app.add_handler(CommandHandler("vidange", export_vidange_vehicle))
