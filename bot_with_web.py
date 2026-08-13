@@ -1,8 +1,9 @@
-import os, sys, logging, asyncio
+import os, sys, logging, asyncio, secrets, functools
 from datetime import datetime, time, timedelta
 from io import BytesIO
 from zoneinfo import ZoneInfo
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
 
 import psycopg2, psycopg2.extras
 from psycopg2.pool import ThreadedConnectionPool
@@ -12,7 +13,7 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, PicklePersistence
 
 # ----------------------------------------------------------------------
 # Environment variables
@@ -22,6 +23,13 @@ ADMIN_GROUP_ID_STR = os.environ.get("ADMIN_GROUP_ID")
 ADMIN_IDS_STR = os.environ.get("ADMIN_IDS", "")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 WEBHOOK_URL = os.environ.get("RENDER_EXTERNAL_URL")
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET_TOKEN")
+if not WEBHOOK_SECRET:
+    WEBHOOK_SECRET = secrets.token_urlsafe(32)
+    logging.warning(
+        "WEBHOOK_SECRET_TOKEN غير مُعرَّف في متغيرات البيئة. تم توليد قيمة عشوائية مؤقتة "
+        "(ستتغير عند كل إعادة تشغيل). يُنصح بشدة بتعيين WEBHOOK_SECRET_TOKEN ثابت في الإعدادات."
+    )
 
 TOPIC_RECLAMATIONS = int(os.environ.get("TOPIC_RECLAMATIONS", "0"))
 TOPIC_VALIDATION = int(os.environ.get("TOPIC_VALIDATION", "0"))
@@ -49,6 +57,14 @@ if ADMIN_IDS_STR:
 
 TZ = ZoneInfo("Africa/Algiers")
 
+# مسار ملف حفظ الحالة (user_data / bot_data) بين إعادات التشغيل.
+# ملاحظة مهمة: هذا يحمي من فقدان الحالة فقط طالما القرص الذي يقيم عليه هذا
+# المسار مستمر (persistent). في Render، القرص الافتراضي مؤقت (ephemeral) ويُمسح
+# عند كل إعادة نشر (deploy) أو انتقال بين خوادم — لذا يجب ربط "Persistent Disk"
+# فعلي في Render وتوجيه PERSISTENCE_PATH إلى مسار داخله كي يبقى الملف فعلاً
+# بين عمليات إعادة التشغيل. راجع دليل النشر أسفل الرد.
+PERSISTENCE_PATH = os.environ.get("PERSISTENCE_PATH", "/tmp/bot_persistence.pkl")
+
 # ----------------------------------------------------------------------
 # Connection pool
 # ----------------------------------------------------------------------
@@ -71,6 +87,18 @@ def db_connection():
         yield conn
     finally:
         put_conn(conn)
+
+# ----------------------------------------------------------------------
+# Executor for offloading blocking DB / Excel work off the event loop
+# ----------------------------------------------------------------------
+_db_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="db-worker")
+
+async def run_db(func, *args, **kwargs):
+    """Runs a blocking (sync) function in a worker thread so the asyncio
+    event loop (and therefore the webhook server) stays responsive while
+    a DB query / Excel generation is in progress."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_db_executor, functools.partial(func, *args, **kwargs))
 
 # ----------------------------------------------------------------------
 # Database initialization
@@ -160,23 +188,48 @@ def invalidate_cache(vehicle: str):
 def refresh_cache(vehicle: str):
     with db_connection() as conn:
         cur = conn.cursor()
-        last_km = None
-        cur.execute("SELECT COUNT(*) FROM problems WHERE vehicle=%s AND status='قيد الانتظار' AND ruglee != 'تم الإصلاح'", (vehicle,))
-        if cur.fetchone()[0] > 0:
-            status = 'bad'
+
+        # شكاوى سائق حقيقية (غير الفيدانج) بانتظار المعالجة -> أحمر
+        cur.execute(
+            "SELECT COUNT(*) FROM problems WHERE vehicle=%s AND status='قيد الانتظار' "
+            "AND ruglee != 'تم الإصلاح' AND (media_type IS NULL OR media_type != 'نظام')",
+            (vehicle,)
+        )
+        pending_normal = cur.fetchone()[0]
+
+        # شكاوى سائق حقيقية قيد التصليح -> برتقالي
+        cur.execute(
+            "SELECT COUNT(*) FROM problems WHERE vehicle=%s AND status='قيد التصليح' "
+            "AND ruglee != 'تم الإصلاح' AND (media_type IS NULL OR media_type != 'نظام')",
+            (vehicle,)
+        )
+        in_progress_normal = cur.fetchone()[0]
+
+        # مشاكل الفيدانج التلقائية غير المُصلحة (بصرف النظر عن حالتها) -> أبيض
+        cur.execute(
+            "SELECT COUNT(*) FROM problems WHERE vehicle=%s AND media_type='نظام' AND ruglee != 'تم الإصلاح'",
+            (vehicle,)
+        )
+        vidange_open = cur.fetchone()[0]
+
+        cur.execute("SELECT km FROM km_readings WHERE vehicle=%s ORDER BY date DESC LIMIT 1", (vehicle,))
+        row = cur.fetchone()
+        last_km = row[0] if row else None
+        last_vid = get_last_vidange_km_noconn(conn, vehicle)
+        # شبكة أمان: إن تجاوز العداد حد الفيدانج (9000 كم) ولم تُنشأ مشكلة النظام
+        # بعد لأي سبب، نعتبرها حالة فيدانج (أبيض) وليست شكوى حمراء
+        if not vidange_open and last_km and last_vid > 0 and last_km >= last_vid + 9000:
+            vidange_open = 1
+
+        if pending_normal > 0:
+            status = 'bad'        # 🔴 شكوى سائق حقيقية بانتظار المعالجة
+        elif in_progress_normal > 0:
+            status = 'en_cours'   # 🟠 شكوى سائق قيد التصليح (حتى لو كان هناك فيدانج مستحق)
+        elif vidange_open > 0:
+            status = 'vidange'    # ⚪ لا شكاوى حقيقية مفتوحة، فقط فيدانج مستحق
         else:
-            cur.execute("SELECT km FROM km_readings WHERE vehicle=%s ORDER BY date DESC LIMIT 1", (vehicle,))
-            row = cur.fetchone()
-            last_km = row[0] if row else None
-            last_vid = get_last_vidange_km_noconn(conn, vehicle)
-            if last_km and last_vid > 0 and last_km >= last_vid + 9500:
-                status = 'bad'
-            else:
-                cur.execute("SELECT COUNT(*) FROM problems WHERE vehicle=%s AND status='قيد التصليح' AND ruglee != 'تم الإصلاح'", (vehicle,))
-                if cur.fetchone()[0] > 0:
-                    status = 'en_cours'
-                else:
-                    status = 'good'
+            status = 'good'       # 🟢 كل شيء سليم
+
         cur.execute("SELECT COUNT(*) FROM problems WHERE vehicle=%s AND ruglee != 'تم الإصلاح'", (vehicle,))
         open_count = cur.fetchone()[0]
         if last_km and last_vid > 0:
@@ -325,6 +378,15 @@ def get_all_problems():
         cur.execute("SELECT * FROM problems ORDER BY date DESC")
         rows = cur.fetchall()
         return [dict(r) for r in rows]
+
+def get_vehicle_history(vehicle: str) -> dict:
+    with db_connection() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT * FROM problems WHERE vehicle=%s ORDER BY date DESC", (vehicle,))
+        problems = [dict(r) for r in cur.fetchall()]
+        cur.execute("SELECT date, km FROM km_readings WHERE vehicle=%s ORDER BY date DESC LIMIT 5", (vehicle,))
+        readings = cur.fetchall()
+    return {"problems": problems, "readings": readings}
 
 def get_driver_problems(user_id: int, status_filter: str = None) -> list:
     with db_connection() as conn:
@@ -495,6 +557,7 @@ def status_emoji_cached(vehicle: str) -> str:
     s = get_vehicle_status_cached(vehicle)
     if s == 'bad': return "🔴"
     if s == 'en_cours': return "🟠"
+    if s == 'vidange': return "⚪"
     return "🟢"
 
 def dashboard_button_text(vehicle: str) -> str:
@@ -578,10 +641,21 @@ def get_topic_keyboard(thread_id: int) -> InlineKeyboardMarkup | None:
         return InlineKeyboardMarkup(actions)
     return None
 
+TELEGRAM_MAX_MESSAGE_LEN = 4096
+
+def safe_text(text: str, limit: int = TELEGRAM_MAX_MESSAGE_LEN - 60) -> str:
+    """Truncates long messages so send/edit never fails with
+    'Message is too long' (Telegram's hard limit is 4096 chars)."""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n\n… (تم اختصار القائمة، النتائج كثيرة جداً لعرضها كاملة)"
+
 def status_icon_and_text(problem: dict) -> str:
     if problem["ruglee"] == "تم الإصلاح":
         return "🟢 مُصلح"
     if problem["status"] == "قيد الانتظار":
+        if problem.get("media_type") == "نظام":
+            return "⚪ قيد الانتظار (فيدانج)"
         return "🔴 قيد الانتظار"
     if problem["status"] == "قيد التصليح":
         return "🟠 قيد التصليح"
@@ -616,7 +690,7 @@ def update_status_line(problem: dict, new_status: str = None, new_ruglee: str = 
     dname = problem["driver_name"]
     veh = problem["vehicle"]
     prob_text = problem["problem_text"]
-    status_line = f"الحالة: {status_icon_and_text({'status': new_status or problem['status'], 'ruglee': new_ruglee or problem['ruglee']})}"
+    status_line = f"الحالة: {status_icon_and_text({'status': new_status or problem['status'], 'ruglee': new_ruglee or problem['ruglee'], 'media_type': problem.get('media_type')})}"
     return f"السائق: {dname}\nالمركبة: {veh}\nالمشكلة: {prob_text}\n{status_line}"
 
 async def _update_problem_message(problem: dict, new_status: str = None, new_ruglee: str = None):
@@ -663,12 +737,12 @@ async def cancel_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id in ADMIN_IDS:
-        add_allowed_user(user_id)
-        set_driver(user_id, approval_status="approved")
-    driver = get_driver(user_id)
+        await run_db(add_allowed_user, user_id)
+        await run_db(set_driver, user_id, approval_status="approved")
+    driver = await run_db(get_driver, user_id)
     if driver and driver["name"] and driver["vehicle"] and driver.get("approval_status") == "approved":
         if driver["state"] != "idle":
-            set_driver(user_id, state="idle")
+            await run_db(set_driver, user_id, state="idle")
         await update.message.reply_text(
             f"أهلاً بعودتك، {driver['name']}!\nمركبتك: {driver['vehicle']}",
             reply_markup=MAIN_KEYBOARD
@@ -676,7 +750,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif driver and driver.get("approval_status") == "pending":
         await update.message.reply_text("شكراً لتسجيلك. طلب صلاحيتك قيد المراجعة. انتظر قبول المشرف.")
     else:
-        set_driver(user_id, state="name_entry", approval_status="pending")
+        await run_db(set_driver, user_id, state="name_entry", approval_status="pending")
         markup = InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء", callback_data="cancel_input")]])
         await update.message.reply_text("مرحباً! الرجاء إدخال اسمك الكامل:", reply_markup=markup)
 
@@ -855,7 +929,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             vidange_problem_id = add_problem(user_id, f"{driver['name']} (نظام)", vehicle, f"Vidange {vehicle}", "نظام")
             await context.bot.send_message(
                 chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_VIDANGE,
-                text=f"⚠️ تنبيه فيدانج: المركبة {vehicle}\nالعداد الحالي: {km} كم\nآخر فيدانج: {last_vid} كم\n🔴 الحالة: قيد الانتظار",
+                text=f"⚠️ تنبيه فيدانج: المركبة {vehicle}\nالعداد الحالي: {km} كم\nآخر فيدانج: {last_vid} كم\n⚪ الحالة: قيد الانتظار",
                 reply_markup=build_problem_keyboard(vidange_problem_id)
             )
         await update.message.reply_text(f"تم تسجيل العداد: {km} كم.", reply_markup=MAIN_KEYBOARD)
@@ -957,7 +1031,8 @@ async def ruglee_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=ADMIN_GROUP_ID, message_id=val_msg_id,
                 text=f"📌 طلب تحقق من الإصلاح:\nالمشكلة #{problem_id} - {problem['problem_text']}\nالمركبة: {problem['vehicle']}\nالسائق: ...\nالحالة: ✅ تم الإصلاح"
             )
-        except: pass
+        except Exception as e:
+            logging.debug(f"Non-critical send/update failure: {e}")
     await query.edit_message_reply_markup(reply_markup=build_problem_keyboard(problem_id))
     if problem["media_type"] == "نظام" and new_ruglee == "تم الإصلاح":
         req_id = problem.get("validation_requester") or problem.get("user_id")
@@ -965,7 +1040,8 @@ async def ruglee_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 await context.bot.send_message(chat_id=req_id, text=f"تم تأكيد إصلاح الفيدانج للمركبة {problem['vehicle']}. الرجاء إدخال الكيلومترات الحالية:")
                 context.bot_data.setdefault("km_await", {})[req_id] = problem["vehicle"]
-            except: pass
+            except Exception as e:
+                logging.debug(f"Non-critical send/update failure: {e}")
 
 async def fix_comment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1059,7 +1135,8 @@ async def valrug_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 await context.bot.send_message(chat_id=req_id, text=f"تم تأكيد إصلاح الفيدانج للمركبة {problem['vehicle']}. الرجاء إدخال الكيلومترات الحالية:")
                 context.bot_data.setdefault("km_await", {})[req_id] = problem["vehicle"]
-            except: pass
+            except Exception as e:
+                logging.debug(f"Non-critical send/update failure: {e}")
 
 async def close_val_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1075,7 +1152,8 @@ async def close_val_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if driver_id:
         try:
             await context.bot.send_message(chat_id=driver_id, text=f"تم إغلاق طلب التحقق للمشكلة #{problem_id}.")
-        except: pass
+        except Exception as e:
+            logging.debug(f"Non-critical send/update failure: {e}")
 
 async def reopen_val_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1088,11 +1166,13 @@ async def reopen_val_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     if driver_id:
         try:
             await context.bot.send_message(chat_id=driver_id, text=f"تم إعادة فتح طلب التحقق للمشكلة #{problem_id}. الرجاء مراجعة الإصلاح.")
-        except: pass
+        except Exception as e:
+            logging.debug(f"Non-critical send/update failure: {e}")
     orig_markup = InlineKeyboardMarkup([[InlineKeyboardButton("✅ تأكيد الإصلاح", callback_data=f"valrug_{problem_id}")]])
     try:
         await query.edit_message_reply_markup(reply_markup=orig_markup)
-    except: pass
+    except Exception as e:
+        logging.debug(f"Non-critical send/update failure: {e}")
 
 # Vidange confirm / modify
 async def vidange_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1114,7 +1194,8 @@ async def vidange_confirm_callback(update: Update, context: ContextTypes.DEFAULT
     await query.edit_message_text(f"✅ تم تأكيد الفيدانج للمركبة {vehicle} بقيمة {km} كم.")
     try:
         await context.bot.send_message(chat_id=user_id, text=f"✅ تم اعتماد تحديث الفيدانج للمركبة {vehicle}: {km} كم.")
-    except: pass
+    except Exception as e:
+        logging.debug(f"Non-critical send/update failure: {e}")
 
 async def vidange_modify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1149,12 +1230,14 @@ async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_driver(user_id, approval_status="approved", state="vehicle_selection")
     try:
         await query.edit_message_text(f"✅ تم قبول المستخدم {user_id}")
-    except: pass
+    except Exception as e:
+        logging.debug(f"Non-critical send/update failure: {e}")
     try:
         await context.bot.send_message(chat_id=user_id, text="تم قبولك. يمكنك الآن اختيار مركبتك:")
         vehicles = get_all_vehicles()
         await context.bot.send_message(chat_id=user_id, text="اختر مركبتك:", reply_markup=vehicle_inline_keyboard(vehicles, "selv_"))
-    except: pass
+    except Exception as e:
+        logging.debug(f"Non-critical send/update failure: {e}")
 
 async def reject_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1165,10 +1248,12 @@ async def reject_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_allowed_user(user_id, status="rejected")
     try:
         await query.edit_message_text(f"❌ تم رفض المستخدم {user_id}")
-    except: pass
+    except Exception as e:
+        logging.debug(f"Non-critical send/update failure: {e}")
     try:
         await context.bot.send_message(chat_id=user_id, text="عذراً، لم يتم قبولك. يمكنك التواصل مع الإدارة.")
-    except: pass
+    except Exception as e:
+        logging.debug(f"Non-critical send/update failure: {e}")
 
 # Admin submenu callbacks
 async def admin_main_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1247,7 +1332,8 @@ async def confirm_remove_driver_exec(update: Update, context: ContextTypes.DEFAU
     await query.edit_message_text(f"✅ تم حذف السائق {user_id}.")
     try:
         await context.bot.send_message(chat_id=user_id, text="تم إلغاء صلاحيتك لاستخدام البوت.")
-    except: pass
+    except Exception as e:
+        logging.debug(f"Non-critical send/update failure: {e}")
 
 # Admin input handler
 async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1279,10 +1365,12 @@ async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                 message_id=info["message_id"],
                 text=f"✅ تم تعديل الفيدانج للمركبة {vehicle} إلى {km} كم."
             )
-        except: pass
+        except Exception as e:
+            logging.debug(f"Non-critical send/update failure: {e}")
         try:
             await context.bot.send_message(chat_id=info["user_id"], text=f"✅ تم تحديث الفيدانج للمركبة {vehicle} بقيمة {km} كم (بعد المراجعة).")
-        except: pass
+        except Exception as e:
+            logging.debug(f"Non-critical send/update failure: {e}")
         await update.message.reply_text(f"✅ تم تحديث الفيدانج لـ {vehicle} = {km} كم.")
         return
     if context.user_data.get("admin_urgentvid"):
@@ -1304,7 +1392,7 @@ async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             vidange_problem_id = add_problem(0, "نظام (عاجل)", code, f"Vidange عاجل {code}", "نظام")
             await context.bot.send_message(
                 chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_VIDANGE,
-                text=f"🚨 فيدانج عاجل: المركبة {code}\nالعداد الحالي: {latest} كم\nآخر فيدانج (محدث): {km} كم\n🔴 الحالة: قيد الانتظار",
+                text=f"🚨 فيدانج عاجل: المركبة {code}\nالعداد الحالي: {latest} كم\nآخر فيدانج (محدث): {km} كم\n⚪ الحالة: قيد الانتظار",
                 reply_markup=build_problem_keyboard(vidange_problem_id)
             )
         await update.message.reply_text(f"✅ تم تعيين آخر فيدانج عاجل للمركبة {code} = {km} كم.")
@@ -1344,21 +1432,22 @@ async def settings_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for v in videos:
         try:
             await context.bot.send_video(chat_id=query.from_user.id, video=v["file_id"], caption=v.get("description"))
-        except: pass
+        except Exception as e:
+            logging.debug(f"Non-critical send/update failure: {e}")
     await query.edit_message_text("تم إرسال الفيديوهات التعليمية.")
 
 async def settings_history_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
-    problems = get_driver_problems(user_id)
+    problems = await run_db(get_driver_problems, user_id)
     if not problems:
         await query.edit_message_text("لا توجد شكاوي مسجلة.")
         return
     text = "📜 سجل شكاويي:\n"
     for p in problems[:10]:
         text += f"#{p['id']} | {p['date']} | {p['problem_text'][:30]} | {status_icon_and_text(p)}\n"
-    await query.edit_message_text(text)
+    await query.edit_message_text(safe_text(text))
 
 async def settings_change_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1432,7 +1521,8 @@ async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(chat_id=d["user_id"], text=message)
             count += 1
-        except: pass
+        except Exception as e:
+            logging.debug(f"Non-critical send/update failure: {e}")
     await update.message.reply_text(f"تم إرسال الرسالة إلى {count} سائق.")
 
 # Dashboard functions
@@ -1473,10 +1563,11 @@ async def scheduled_dashboard(context: ContextTypes.DEFAULT_TYPE):
     await _send_dashboard(ADMIN_GROUP_ID, TOPIC_GENERAL)
 
 async def weekly_excel(context: ContextTypes.DEFAULT_TYPE):
-    file = generate_problems_excel()
+    file = await run_db(generate_problems_excel)
     try:
         await context.bot.send_document(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_GENERAL, document=file, filename="المشاكل_الأسبوعي.xlsx")
-    except: pass
+    except Exception as e:
+        logging.warning(f"Weekly excel send failed: {e}")
 
 def schedule_jobs(app: Application):
     now = datetime.now(TZ)
@@ -1491,25 +1582,35 @@ def schedule_jobs(app: Application):
 
 # Export functions
 async def export_problems(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    file = generate_problems_excel()
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ هذا الأمر مخصص للمشرفين فقط.")
+        return
+    file = await run_db(generate_problems_excel)
     if update.message:
         await update.message.reply_document(document=file, filename="المشاكل.xlsx")
     else:
         await context.bot.send_document(chat_id=update.effective_chat.id, document=file, filename="المشاكل.xlsx")
 
 async def export_vidange(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    file = generate_vidange_excel()
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ هذا الأمر مخصص للمشرفين فقط.")
+        return
+    file = await run_db(generate_vidange_excel)
     if update.message:
         await update.message.reply_document(document=file, filename="الفيدانج.xlsx")
     else:
         await context.bot.send_document(chat_id=update.effective_chat.id, document=file, filename="الفيدانج.xlsx")
 
 async def export_vidange_vehicle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ هذا الأمر مخصص للمشرفين فقط.")
+        return
     code = context.args[0].upper() if context.args else None
-    if not code or code not in get_all_vehicles():
+    all_vehicles = await run_db(get_all_vehicles)
+    if not code or code not in all_vehicles:
         await update.message.reply_text("استخدم: /vidange <CODE> مع رمز مركبة صحيح.")
         return
-    file = generate_vidange_excel(vehicle_code=code)
+    file = await run_db(generate_vidange_excel, code)
     await update.message.reply_document(document=file, filename=f"فيدانج_{code}.xlsx")
 
 # Sticky admin panel command
@@ -1578,7 +1679,7 @@ async def admin_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if query.from_user.id not in ADMIN_IDS: return
-    file = generate_problems_excel()
+    file = await run_db(generate_problems_excel)
     await context.bot.send_document(chat_id=query.message.chat_id, document=file, filename="المشاكل.xlsx")
     await query.edit_message_text("تم إرسال ملف المشاكل.")
 
@@ -1586,7 +1687,7 @@ async def admin_vid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if query.from_user.id not in ADMIN_IDS: return
-    file = generate_vidange_excel()
+    file = await run_db(generate_vidange_excel)
     await context.bot.send_document(chat_id=query.message.chat_id, document=file, filename="الفيدانج.xlsx")
     await query.edit_message_text("تم إرسال ملف الفيدانج.")
 
@@ -1594,26 +1695,28 @@ async def admin_listveh(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if query.from_user.id not in ADMIN_IDS: return
-    vehicles = get_all_vehicles()
+    vehicles = await run_db(get_all_vehicles)
     text = "🚘 المركبات المتاحة:\n" + "\n".join(f"• {v}" for v in vehicles) if vehicles else "لا توجد مركبات."
-    await query.edit_message_text(text)
+    await query.edit_message_text(safe_text(text))
 
 async def vehicle_history_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     vehicle = query.data.split("_", 1)[1]
-    with db_connection() as conn:
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("SELECT * FROM problems WHERE vehicle=%s ORDER BY date DESC", (vehicle,))
-        problems = [dict(r) for r in cur.fetchall()]
-        cur.execute("SELECT date, km FROM km_readings WHERE vehicle=%s ORDER BY date DESC LIMIT 5", (vehicle,))
-        readings = cur.fetchall()
+    history = await run_db(get_vehicle_history, vehicle)
+    problems, readings = history["problems"], history["readings"]
+    group_id_str = str(ADMIN_GROUP_ID)
+    group_id_for_link = group_id_str[4:] if group_id_str.startswith("-100") else None
     text = f"🚘 تاريخ المركبة {vehicle}:\n"
     if problems:
         text += "\n📋 المشاكل:\n"
         for p in problems:
-            link = f"https://t.me/c/{str(ADMIN_GROUP_ID)[4:]}/{p['group_message_id']}" if p['group_message_id'] else "#"
-            text += f"  <a href='{link}'>#{p['id']}</a> | {p['date']} | {p['problem_text'][:40]} | {status_icon_and_text(p)}\n"
+            if p['group_message_id'] and group_id_for_link:
+                link = f"https://t.me/c/{group_id_for_link}/{p['group_message_id']}"
+                label = f"<a href='{link}'>#{p['id']}</a>"
+            else:
+                label = f"#{p['id']}"
+            text += f"  {label} | {p['date']} | {p['problem_text'][:40]} | {status_icon_and_text(p)}\n"
     else:
         text += "لا توجد مشاكل مسجلة.\n"
     if readings:
@@ -1621,7 +1724,7 @@ async def vehicle_history_callback(update: Update, context: ContextTypes.DEFAULT
         for d, k in readings:
             text += f"  {d} - {k} كم\n"
     markup = InlineKeyboardMarkup([[InlineKeyboardButton("تم", callback_data="done_hist")]])
-    await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_HISTORY, text=text, parse_mode="HTML", reply_markup=markup)
+    await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_HISTORY, text=safe_text(text), parse_mode="HTML", reply_markup=markup)
 
 async def done_history_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1652,21 +1755,32 @@ async def health(request):
     return web.Response(text="Bot is running")
 
 async def telegram_webhook(request):
-    data = await request.json()
-    update = Update.de_json(data, app.bot)
-    await app.process_update(update)
+    if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
+        logging.warning("Rejected webhook request with invalid/missing secret token.")
+        return web.Response(status=403)
+    try:
+        data = await request.json()
+    except Exception as e:
+        logging.warning(f"Invalid webhook JSON payload: {e}")
+        return web.Response(status=400)
+    try:
+        update = Update.de_json(data, app.bot)
+        await app.process_update(update)
+    except Exception as e:
+        logging.error(f"Error processing update: {e}", exc_info=True)
     return web.Response(status=200)
 
 async def set_webhook(app: Application):
     webhook_url = f"{WEBHOOK_URL}/telegram"
-    await app.bot.set_webhook(url=webhook_url)
+    await app.bot.set_webhook(url=webhook_url, secret_token=WEBHOOK_SECRET)
     logging.info(f"Webhook set to {webhook_url}")
 
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     init_db()
     global app
-    app = Application.builder().token(BOT_TOKEN).build()
+    persistence = PicklePersistence(filepath=PERSISTENCE_PATH)
+    app = Application.builder().token(BOT_TOKEN).persistence(persistence).build()
 
     # Command handlers
     app.add_handler(CommandHandler("start", start))
@@ -1685,7 +1799,7 @@ async def main():
     # Text / Media handlers (restricted to private chats)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_text))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_input_handler), group=1)
-    app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.VOICE & filters.ChatType.PRIVATE, handle_media))
+    app.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO | filters.VOICE) & filters.ChatType.PRIVATE, handle_media))
 
     # Callback handlers
     app.add_handler(CallbackQueryHandler(cancel_input, pattern="^cancel_input$"))
