@@ -6,3 +6,32 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: python bot_with_web.py
     pythonVersion: 3.11.9
+    disk:
+      name: bot-persistence
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: ADMIN_IDS
+        sync: false
+      - key: ADMIN_GROUP_ID
+        sync: false
+      - key: TOPIC_RECLAMATIONS
+        sync: false
+      - key: TOPIC_VALIDATION
+        sync: false
+      - key: TOPIC_VIDANGE
+        sync: false
+      - key: TOPIC_GENERAL
+        sync: false
+      - key: TOPIC_HISTORY
+        sync: false
+      - key: WEBHOOK_SECRET_TOKEN
+        generateValue: true
+      - key: APP_JWT_SECRET
+        generateValue: true
+      - key: PERSISTENCE_PATH
+        value: /var/data/bot_persistence.pkl
