@@ -452,64 +452,27 @@ def add_km_reading(vehicle: str, km: int, driver_name: str = ""):
         conn.commit()
     invalidate_cache(vehicle)
 
-def get_latest_km_record(vehicle: str) -> dict | None:
-    """Return the most recently inserted counter reading for a vehicle.
-
-    The reading's database id is used instead of the text timestamp because two
-    readings can be entered within the same second.
-    """
+def fix_latest_km_reading(vehicle: str, corrected_km: int) -> tuple[bool, int | None]:
+    """يصحّح آخر قراءة عداد مسجَّلة لمركبة (بدل حذفها) — يُستخدم عند إدخال
+    السائق لرقم خاطئ عن طريق الخطأ. يُعيد (نجح, القيمة القديمة قبل التصحيح)."""
     with db_connection() as conn:
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute(
-            "SELECT id, km, date, driver_name FROM km_readings "
-            "WHERE vehicle=%s ORDER BY id DESC LIMIT 1",
-            (vehicle,),
-        )
+        cur = conn.cursor()
+        cur.execute("SELECT id, km FROM km_readings WHERE vehicle=%s ORDER BY date DESC LIMIT 1", (vehicle,))
         row = cur.fetchone()
-        return dict(row) if row else None
-
-def update_latest_km(vehicle: str, new_km: int) -> dict:
-    """Update the latest counter reading without allowing an invalid sequence.
-
-    The row is locked during the read/update operation. If an older reading
-    exists, the corrected value must remain strictly greater than it so the
-    vehicle's counter history stays monotonic.
-    """
-    with db_connection() as conn:
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute(
-            "SELECT id, km, date, driver_name FROM km_readings "
-            "WHERE vehicle=%s ORDER BY id DESC LIMIT 2 FOR UPDATE",
-            (vehicle,),
-        )
-        rows = [dict(row) for row in cur.fetchall()]
-        if not rows:
-            return {"status": "not_found"}
-
-        latest = rows[0]
-        previous = rows[1] if len(rows) > 1 else None
-        if previous and new_km <= previous["km"]:
-            return {
-                "status": "invalid_order",
-                "old_km": latest["km"],
-                "previous_km": previous["km"],
-            }
-
-        cur.execute("UPDATE km_readings SET km=%s WHERE id=%s", (new_km, latest["id"]))
+        if not row:
+            return False, None
+        reading_id, old_km = row
+        cur.execute("UPDATE km_readings SET km=%s WHERE id=%s", (corrected_km, reading_id))
         conn.commit()
-
     invalidate_cache(vehicle)
-    return {
-        "status": "updated",
-        "old_km": latest["km"],
-        "new_km": new_km,
-        "date": latest["date"],
-        "driver_name": latest.get("driver_name") or "",
-    }
+    return True, old_km
 
 def get_latest_km(vehicle: str) -> int | None:
-    record = get_latest_km_record(vehicle)
-    return record["km"] if record else None
+    with db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT km FROM km_readings WHERE vehicle=%s ORDER BY date DESC LIMIT 1", (vehicle,))
+        row = cur.fetchone()
+        return row[0] if row else None
 
 def get_last_vidange_km(vehicle: str) -> int:
     with db_connection() as conn:
@@ -1737,61 +1700,6 @@ async def delete_problem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     await update.message.reply_text(f"✅ تم حذف الشكوى #{problem_id} الخاصة بالمركبة {vehicle_code} نهائياً من قاعدة البيانات.")
 
-async def edit_latest_km_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Correct the latest counter reading for a vehicle.
-
-    Usage: /editkm <vehicle_code> <new_km>
-    Only administrators may use this command. The command changes the most
-    recently inserted reading and leaves all older readings untouched.
-    """
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ هذا الأمر مخصص للمشرفين فقط.")
-        return
-    if len(context.args) != 2:
-        await update.message.reply_text(
-            "استخدم: /editkm <رمز المركبة> <العداد الجديد>\n"
-            "مثال: /editkm M15 125430"
-        )
-        return
-
-    vehicle = context.args[0].strip().upper()
-    if not vehicle:
-        await update.message.reply_text("رمز المركبة غير صالح.")
-        return
-
-    try:
-        new_km = int(context.args[1])
-    except ValueError:
-        await update.message.reply_text("قيمة العداد يجب أن تكون رقماً صحيحاً.")
-        return
-    if new_km < 0:
-        await update.message.reply_text("قيمة العداد لا يمكن أن تكون سالبة.")
-        return
-
-    vehicles = await run_db(get_all_vehicles)
-    if vehicle not in vehicles:
-        await update.message.reply_text(f"لا توجد مركبة بالرمز {vehicle}.")
-        return
-
-    result = await run_db(update_latest_km, vehicle, new_km)
-    if result["status"] == "not_found":
-        await update.message.reply_text(f"لا توجد قراءة عداد سابقة للمركبة {vehicle}.")
-        return
-    if result["status"] == "invalid_order":
-        await update.message.reply_text(
-            f"⚠️ لا يمكن اعتماد {new_km} كم، لأن القراءة السابقة قبل آخر إدخال هي "
-            f"{result['previous_km']} كم. يجب أن تكون القيمة المصححة أكبر منها."
-        )
-        return
-
-    driver_name = result["driver_name"] or "غير معروف"
-    await update.message.reply_text(
-        f"✅ تم تصحيح آخر قراءة عداد للمركبة {vehicle}.\n"
-        f"القيمة القديمة: {result['old_km']} كم\n"
-        f"القيمة الجديدة: {result['new_km']} كم\n"
-        f"السائق المرتبط بالقراءة: {driver_name}"
-    )
-
 async def applogin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/applogin — يولّد كوداً من 6 أرقام صالحاً لمدة 10 دقائق لتسجيل الدخول
     في تطبيق أندرويد الإداري. يعمل فقط للمستخدمين المسجّلين في جدول admins."""
@@ -1808,6 +1716,46 @@ async def applogin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⏳ صالح لمدة 10 دقائق فقط.\n"
         f"أدخل معرّفك (ID: <code>{user_id}</code>) وهذا الكود في شاشة تسجيل الدخول بالتطبيق.",
         parse_mode="HTML"
+    )
+
+async def fixkm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/fixkm <رمز المركبة> <القيمة الصحيحة> — يصحّح آخر قراءة عداد أُدخلت
+    بالخطأ (بدل حذفها، حفاظاً على تاريخ القراءات). يُستخدم مثلاً عندما يُدخل
+    السائق 165000 بدل 16500 بالخطأ."""
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ هذا الأمر مخصص للمشرفين فقط.")
+        return
+    if len(context.args) != 2:
+        await update.message.reply_text(
+            "استخدم: /fixkm <رمز المركبة> <القيمة الصحيحة>\n"
+            "مثال: /fixkm M15 16500\n\n"
+            "يُستخدم لتصحيح آخر قراءة عداد أُدخلت بالخطأ (مثل 165000 بدل 16500)."
+        )
+        return
+    vehicle_code = context.args[0].upper()
+    try:
+        corrected_km = int(context.args[1])
+    except ValueError:
+        await update.message.reply_text("القيمة الصحيحة يجب أن تكون رقماً صحيحاً.")
+        return
+    if corrected_km <= 0:
+        await update.message.reply_text("القيمة يجب أن تكون أكبر من صفر.")
+        return
+
+    all_vehicles = await run_db(get_all_vehicles)
+    if vehicle_code not in all_vehicles:
+        await update.message.reply_text(f"لا توجد مركبة بالرمز {vehicle_code}.")
+        return
+
+    success, old_km = await run_db(fix_latest_km_reading, vehicle_code, corrected_km)
+    if not success:
+        await update.message.reply_text(f"لا توجد أي قراءة عداد مسجَّلة أصلاً للمركبة {vehicle_code} لتصحيحها.")
+        return
+
+    await update.message.reply_text(
+        f"✅ تم تصحيح آخر قراءة عداد للمركبة {vehicle_code}:\n"
+        f"القيمة الخاطئة السابقة: {old_km} كم\n"
+        f"القيمة الصحيحة الجديدة: {corrected_km} كم"
     )
 
 # Dashboard functions
@@ -1854,15 +1802,33 @@ async def weekly_excel(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.warning(f"Weekly excel send failed: {e}")
 
+def _next_run_with_grace(now: datetime, target_dt: datetime, interval: timedelta, grace_minutes: int = 10) -> datetime:
+    """يحسب موعد أول تشغيل لمهمة مجدولة، مع فترة سماح للتعويض عند إعادة التشغيل:
+    - إن كان الموعد لم يحن بعد اليوم -> يُجدوَل بشكل طبيعي في موعده.
+    - إن تجاوز الموعد بأقل من grace_minutes دقيقة (مثلاً بسبب إعادة تشغيل البوت
+      قريباً من 7:30) -> تُرسَل المهمة فوراً تعويضاً عن الفترة الفائتة.
+    - إن تجاوز الموعد بأكثر من grace_minutes دقيقة -> تُؤجَّل للدورة القادمة
+      (غداً للمهمة اليومية، الأسبوع القادم للمهمة الأسبوعية) بدل إرسالها متأخرة جداً.
+    """
+    grace = timedelta(minutes=grace_minutes)
+    if now < target_dt:
+        return target_dt
+    elif now <= target_dt + grace:
+        return now + timedelta(seconds=5)
+    else:
+        return target_dt + interval
+
 def schedule_jobs(app: Application):
     now = datetime.now(TZ)
-    target = time(7, 30, 0)
-    next_daily = datetime.combine(now.date(), target, tzinfo=TZ)
-    if now >= next_daily: next_daily += timedelta(days=1)
+    target = time(7, 30, 0)  # 7:30 صباحاً بتوقيت الجزائر (Africa/Algiers) — للداشبورد اليومي وتقرير السبت الأسبوعي معاً
+
+    today_target = datetime.combine(now.date(), target, tzinfo=TZ)
+    next_daily = _next_run_with_grace(now, today_target, timedelta(days=1))
     app.job_queue.run_repeating(scheduled_dashboard, interval=24*60*60, first=next_daily)
+
     days_until_sat = (5 - now.weekday()) % 7
-    next_sat = datetime.combine(now.date() + timedelta(days=days_until_sat), target, tzinfo=TZ)
-    if now >= next_sat: next_sat += timedelta(days=7)
+    today_or_next_sat_target = datetime.combine(now.date() + timedelta(days=days_until_sat), target, tzinfo=TZ)
+    next_sat = _next_run_with_grace(now, today_or_next_sat_target, timedelta(days=7))
     app.job_queue.run_repeating(weekly_excel, interval=7*24*60*60, first=next_sat)
 
 # Export functions
@@ -2407,8 +2373,8 @@ async def main():
     app.add_handler(CommandHandler("removehelp", remove_help_cmd))
     app.add_handler(CommandHandler("broadcast", broadcast_cmd))
     app.add_handler(CommandHandler("delete", delete_problem_cmd))
-    app.add_handler(CommandHandler("editkm", edit_latest_km_cmd))
     app.add_handler(CommandHandler("applogin", applogin_cmd))
+    app.add_handler(CommandHandler("fixkm", fixkm_cmd))
     app.add_handler(CommandHandler("export", export_problems))
     app.add_handler(CommandHandler("export_vidange", export_vidange))
     app.add_handler(CommandHandler("vidange", export_vidange_vehicle))
@@ -2470,6 +2436,7 @@ async def main():
     app.add_error_handler(error_handler)
     schedule_jobs(app)
     await app.initialize()
+    await app.start()
     await set_webhook(app)
 
     aio_app = web.Application(middlewares=[api_error_middleware])
