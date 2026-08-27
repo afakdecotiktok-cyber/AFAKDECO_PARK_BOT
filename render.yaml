@@ -27,6 +27,8 @@ services:
         sync: false
       - key: TOPIC_GENERAL
         sync: false
+      - key: TOPIC_VEHICLE_MGMT
+        sync: false
       - key: TOPIC_HISTORY
         sync: false
       - key: WEBHOOK_SECRET_TOKEN
