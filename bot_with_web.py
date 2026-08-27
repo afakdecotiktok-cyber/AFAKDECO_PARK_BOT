@@ -814,7 +814,8 @@ def update_status_line(problem: dict, new_status: str = None, new_ruglee: str = 
     return f"السائق: {dname}\nالمركبة: {veh}\nالمشكلة: {prob_text}\n{status_line}"
 
 async def _update_problem_message(problem: dict, new_status: str = None, new_ruglee: str = None):
-    if not problem["group_message_id"]:
+    """Synchronize the original reclamation message with its database state."""
+    if not problem or not problem.get("group_message_id"):
         return
     new_text = update_status_line(problem, new_status=new_status, new_ruglee=new_ruglee)
     try:
@@ -1126,9 +1127,10 @@ async def valide_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     problem = get_problem(problem_id)
     if not problem: return await query.answer("المشكلة غير موجودة.")
     new_status = "قيد التصليح" if problem["status"] == "قيد الانتظار" else "قيد الانتظار"
-    update_problem_status(problem_id, status=new_status)
-    await _update_problem_message(problem, new_status=new_status)
-    await query.edit_message_reply_markup(reply_markup=build_problem_keyboard(problem_id))
+    await run_db(update_problem_status, problem_id, status=new_status)
+    updated_problem = await run_db(get_problem, problem_id)
+    await _update_problem_message(updated_problem)
+    await query.edit_message_reply_markup(reply_markup=await run_db(build_problem_keyboard, problem_id))
 
 async def ruglee_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1142,8 +1144,9 @@ async def ruglee_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["awaiting_comment"] = problem_id
         return
     new_ruglee = "تم الإصلاح" if problem["ruglee"] == "غير مُصلح" else "غير مُصلح"
-    update_problem_status(problem_id, ruglee=new_ruglee)
-    await _update_problem_message(problem, ruglee=new_ruglee)
+    await run_db(update_problem_status, problem_id, ruglee=new_ruglee)
+    updated_problem = await run_db(get_problem, problem_id)
+    await _update_problem_message(updated_problem)
     val_msg_id = context.bot_data.get("validation_msgs", {}).pop(problem_id, None)
     if val_msg_id:
         try:
@@ -1153,13 +1156,13 @@ async def ruglee_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             logging.debug(f"Non-critical send/update failure: {e}")
-    await query.edit_message_reply_markup(reply_markup=build_problem_keyboard(problem_id))
-    if problem["media_type"] == "نظام" and new_ruglee == "تم الإصلاح":
-        req_id = problem.get("validation_requester") or problem.get("user_id")
+    await query.edit_message_reply_markup(reply_markup=await run_db(build_problem_keyboard, problem_id))
+    if updated_problem["media_type"] == "نظام" and new_ruglee == "تم الإصلاح":
+        req_id = updated_problem.get("validation_requester") or updated_problem.get("user_id")
         if req_id:
             try:
-                await context.bot.send_message(chat_id=req_id, text=f"تم تأكيد إصلاح الفيدانج للمركبة {problem['vehicle']}. الرجاء إدخال الكيلومترات الحالية:")
-                context.bot_data.setdefault("km_await", {})[req_id] = problem["vehicle"]
+                await context.bot.send_message(chat_id=req_id, text=f"تم تأكيد إصلاح الفيدانج للمركبة {updated_problem['vehicle']}. الرجاء إدخال الكيلومترات الحالية:")
+                context.bot_data.setdefault("km_await", {})[req_id] = updated_problem["vehicle"]
             except Exception as e:
                 logging.debug(f"Non-critical send/update failure: {e}")
 
@@ -1245,8 +1248,9 @@ async def valrug_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["awaiting_comment"] = problem_id
         return
     new_ruglee = "تم الإصلاح" if problem["ruglee"] == "غير مُصلح" else "غير مُصلح"
-    update_problem_status(problem_id, ruglee=new_ruglee)
-    await _update_problem_message(problem, ruglee=new_ruglee)
+    await run_db(update_problem_status, problem_id, ruglee=new_ruglee)
+    updated_problem = await run_db(get_problem, problem_id)
+    await _update_problem_message(updated_problem)
     post_markup = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔒 إغلاق الطلب", callback_data=f"close_val_{problem_id}"),
          InlineKeyboardButton("🔄 إعادة فتح", callback_data=f"reopen_val_{problem_id}")]
@@ -1256,12 +1260,12 @@ async def valrug_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.warning(f"Failed to update val msg markup: {e}")
     context.bot_data.get("validation_msgs", {}).pop(problem_id, None)
-    if problem["media_type"] == "نظام" and new_ruglee == "تم الإصلاح":
-        req_id = problem.get("validation_requester") or problem.get("user_id")
+    if updated_problem["media_type"] == "نظام" and new_ruglee == "تم الإصلاح":
+        req_id = updated_problem.get("validation_requester") or updated_problem.get("user_id")
         if req_id:
             try:
-                await context.bot.send_message(chat_id=req_id, text=f"تم تأكيد إصلاح الفيدانج للمركبة {problem['vehicle']}. الرجاء إدخال الكيلومترات الحالية:")
-                context.bot_data.setdefault("km_await", {})[req_id] = problem["vehicle"]
+                await context.bot.send_message(chat_id=req_id, text=f"تم تأكيد إصلاح الفيدانج للمركبة {updated_problem['vehicle']}. الرجاء إدخال الكيلومترات الحالية:")
+                context.bot_data.setdefault("km_await", {})[req_id] = updated_problem["vehicle"]
             except Exception as e:
                 logging.debug(f"Non-critical send/update failure: {e}")
 
@@ -1348,39 +1352,68 @@ async def vidange_modify_callback(update: Update, context: ContextTypes.DEFAULT_
     await query.edit_message_text("✏️ أرسل القيمة الصحيحة للكيلومتر بعد الفيدانج:", reply_markup=markup)
 
 # Approval / Rejection callbacks
+async def _is_admin_user(user_id: int) -> bool:
+    """Accept both legacy ADMIN_IDS admins and admins persisted in PostgreSQL."""
+    if user_id in ADMIN_IDS:
+        return True
+    try:
+        return bool(await run_db(get_admin, user_id))
+    except Exception:
+        logging.exception("Could not verify admin %s", user_id)
+        return False
+
 async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
-    if query.from_user.id not in ADMIN_IDS: return
-    user_id = int(query.data.split("_")[1])
-    add_allowed_user(user_id)
-    set_driver(user_id, approval_status="approved", state="vehicle_selection")
+    if not await _is_admin_user(query.from_user.id):
+        await query.answer("⛔ غير مصرح لك.", show_alert=True)
+        return
+    await query.answer("جارٍ اعتماد السائق…")
     try:
-        await query.edit_message_text(f"✅ تم قبول المستخدم {user_id}")
-    except Exception as e:
-        logging.debug(f"Non-critical send/update failure: {e}")
+        user_id = int(query.data.split("_", 1)[1])
+    except (IndexError, ValueError):
+        await query.answer("طلب اعتماد غير صالح.", show_alert=True)
+        return
+
+    await run_db(add_allowed_user, user_id, "approved")
+    await run_db(set_driver, user_id, approval_status="approved", state="vehicle_selection")
+    context.bot_data.setdefault("approval_msg", {}).pop(user_id, None)
     try:
-        await context.bot.send_message(chat_id=user_id, text="تم قبولك. يمكنك الآن اختيار مركبتك:")
-        vehicles = get_all_vehicles()
-        await context.bot.send_message(chat_id=user_id, text="اختر مركبتك:", reply_markup=vehicle_inline_keyboard(vehicles, "selv_"))
+        await query.edit_message_text(f"✅ تم قبول المستخدم {user_id}\nالحالة: تمت الموافقة، بانتظار اختيار المركبة.")
     except Exception as e:
-        logging.debug(f"Non-critical send/update failure: {e}")
+        logging.warning("Could not update approval message for %s: %s", user_id, e)
+    try:
+        vehicles = await run_db(get_all_vehicles)
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="✅ تم قبول تسجيلك. اختر المركبة المرتبطة بك:",
+            reply_markup=vehicle_inline_keyboard(vehicles, "selv_"),
+        )
+    except Exception as e:
+        logging.warning("Could not notify approved driver %s: %s", user_id, e)
 
 async def reject_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
-    if query.from_user.id not in ADMIN_IDS: return
-    user_id = int(query.data.split("_")[1])
-    set_driver(user_id, approval_status="rejected")
-    add_allowed_user(user_id, status="rejected")
+    if not await _is_admin_user(query.from_user.id):
+        await query.answer("⛔ غير مصرح لك.", show_alert=True)
+        return
+    await query.answer("جارٍ رفض الطلب…")
     try:
-        await query.edit_message_text(f"❌ تم رفض المستخدم {user_id}")
-    except Exception as e:
-        logging.debug(f"Non-critical send/update failure: {e}")
+        user_id = int(query.data.split("_", 1)[1])
+    except (IndexError, ValueError):
+        await query.answer("طلب رفض غير صالح.", show_alert=True)
+        return
+
+    await run_db(set_driver, user_id, approval_status="rejected", state="idle")
+    await run_db(add_allowed_user, user_id, "rejected")
+    context.bot_data.setdefault("approval_msg", {}).pop(user_id, None)
     try:
-        await context.bot.send_message(chat_id=user_id, text="عذراً، لم يتم قبولك. يمكنك التواصل مع الإدارة.")
+        await query.edit_message_text(f"❌ تم رفض المستخدم {user_id}\nالحالة: مرفوض")
     except Exception as e:
-        logging.debug(f"Non-critical send/update failure: {e}")
+        logging.warning("Could not update rejection message for %s: %s", user_id, e)
+    try:
+        await context.bot.send_message(chat_id=user_id, text="عذراً، تم رفض طلب التسجيل. يمكنك التواصل مع الإدارة.")
+    except Exception as e:
+        logging.warning("Could not notify rejected driver %s: %s", user_id, e)
 
 # Admin submenu callbacks
 async def admin_main_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1418,8 +1451,14 @@ async def admin_approve_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not pending:
         await query.edit_message_text("لا يوجد سائقون بانتظار القبول.")
         return
-    buttons = [InlineKeyboardButton(f"{d['name']} ({d['user_id']})", callback_data=f"approve_{d['user_id']}") for d in pending]
-    await query.edit_message_text("اختر سائقًا لقبوله:", reply_markup=InlineKeyboardMarkup([buttons[i:i+2] for i in range(0, len(buttons), 2)]))
+    rows = []
+    for d in pending:
+        label = d['name'] or str(d['user_id'])
+        rows.append([
+            InlineKeyboardButton(f"✅ قبول {label}", callback_data=f"approve_{d['user_id']}"),
+            InlineKeyboardButton(f"❌ رفض {label}", callback_data=f"reject_{d['user_id']}"),
+        ])
+    await query.edit_message_text("اختر إجراءً للسائق المعلّق:", reply_markup=InlineKeyboardMarkup(rows))
 
 async def admin_remove_driver_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1759,21 +1798,31 @@ async def fixkm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # Dashboard functions
-async def _send_dashboard(chat_id: int, thread_id: int = None):
-    vehicles = get_all_vehicles()
-    if not vehicles:
-        return
-    buttons = [InlineKeyboardButton(dashboard_button_text(v), callback_data=f"hist_{v}") for v in vehicles]
-    markup = InlineKeyboardMarkup([buttons[i:i+2] for i in range(0, len(buttons), 2)])
+async def _send_dashboard(chat_id: int, thread_id: int = None, bot=None):
+    """Build and send the dashboard without blocking Telegram's event loop."""
+    sender = bot or app.bot
     try:
+        vehicles = await run_db(get_all_vehicles)
+        if not vehicles:
+            logging.warning("Dashboard skipped: no vehicles found")
+            return False
+        buttons = []
+        for vehicle in vehicles:
+            text = await run_db(dashboard_button_text, vehicle)
+            buttons.append(InlineKeyboardButton(text, callback_data=f"hist_{vehicle}"))
+        markup = InlineKeyboardMarkup([buttons[i:i+2] for i in range(0, len(buttons), 2)])
+        send_kwargs = {
+            "chat_id": chat_id,
+            "text": "📊 الحالة اليومية للمركبات:",
+            "reply_markup": markup,
+        }
         if thread_id:
-            await app.bot.send_message(chat_id=chat_id, message_thread_id=thread_id,
-                                       text="📊 الحالة اليومية للمركبات:", reply_markup=markup)
-        else:
-            await app.bot.send_message(chat_id=chat_id,
-                                       text="📊 الحالة اليومية للمركبات:", reply_markup=markup)
-    except Exception as e:
-        logging.warning(f"Dashboard send error: {e}")
+            send_kwargs["message_thread_id"] = thread_id
+        await sender.send_message(**send_kwargs)
+        return True
+    except Exception:
+        logging.exception("Dashboard send failed for chat_id=%s thread_id=%s", chat_id, thread_id)
+        return False
 
 async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -1793,7 +1842,8 @@ async def admin_dash(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text("تم إرسال لوحة القيادة.")
 
 async def scheduled_dashboard(context: ContextTypes.DEFAULT_TYPE):
-    await _send_dashboard(ADMIN_GROUP_ID, TOPIC_GENERAL)
+    logging.info("Running scheduled daily dashboard")
+    await _send_dashboard(ADMIN_GROUP_ID, TOPIC_GENERAL, bot=context.bot)
 
 async def weekly_excel(context: ContextTypes.DEFAULT_TYPE):
     file = await run_db(generate_problems_excel)
@@ -1819,17 +1869,40 @@ def _next_run_with_grace(now: datetime, target_dt: datetime, interval: timedelta
         return target_dt + interval
 
 def schedule_jobs(app: Application):
+    """Register jobs after Application.initialize(), when JobQueue is ready."""
+    if app.job_queue is None:
+        raise RuntimeError(
+            "JobQueue is unavailable. Install python-telegram-bot[job-queue] in requirements.txt."
+        )
     now = datetime.now(TZ)
-    target = time(7, 30, 0)  # 7:30 صباحاً بتوقيت الجزائر (Africa/Algiers) — للداشبورد اليومي وتقرير السبت الأسبوعي معاً
+    target = time(7, 30, 0)
 
     today_target = datetime.combine(now.date(), target, tzinfo=TZ)
     next_daily = _next_run_with_grace(now, today_target, timedelta(days=1))
-    app.job_queue.run_repeating(scheduled_dashboard, interval=24*60*60, first=next_daily)
+    daily_job = app.job_queue.run_repeating(
+        scheduled_dashboard,
+        interval=timedelta(days=1),
+        first=next_daily,
+        name="daily_dashboard",
+    )
 
     days_until_sat = (5 - now.weekday()) % 7
-    today_or_next_sat_target = datetime.combine(now.date() + timedelta(days=days_until_sat), target, tzinfo=TZ)
+    today_or_next_sat_target = datetime.combine(
+        now.date() + timedelta(days=days_until_sat), target, tzinfo=TZ
+    )
     next_sat = _next_run_with_grace(now, today_or_next_sat_target, timedelta(days=7))
-    app.job_queue.run_repeating(weekly_excel, interval=7*24*60*60, first=next_sat)
+    weekly_job = app.job_queue.run_repeating(
+        weekly_excel,
+        interval=timedelta(days=7),
+        first=next_sat,
+        name="weekly_excel",
+    )
+    logging.info(
+        "Scheduled jobs registered: daily_dashboard first=%s, weekly_excel first=%s",
+        next_daily.isoformat(),
+        next_sat.isoformat(),
+    )
+    return daily_job, weekly_job
 
 # Export functions
 async def export_problems(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2131,13 +2204,14 @@ async def api_problem_fix(request):
         return json_err("يجب إضافة تعليق أولاً قبل تأكيد الإصلاح", status=409)
     new_ruglee = "تم الإصلاح" if problem["ruglee"] == "غير مُصلح" else "غير مُصلح"
     await run_db(update_problem_status, problem_id, None, new_ruglee)
-    await _update_problem_message(problem, ruglee=new_ruglee)
-    if problem["media_type"] == "نظام" and new_ruglee == "تم الإصلاح":
-        req_id = problem.get("validation_requester") or problem.get("user_id")
+    updated_problem = await run_db(get_problem, problem_id)
+    await _update_problem_message(updated_problem)
+    if updated_problem["media_type"] == "نظام" and new_ruglee == "تم الإصلاح":
+        req_id = updated_problem.get("validation_requester") or updated_problem.get("user_id")
         if req_id:
             try:
-                await app.bot.send_message(chat_id=req_id, text=f"تم تأكيد إصلاح الفيدانج للمركبة {problem['vehicle']}. الرجاء إدخال الكيلومترات الحالية:")
-                app.bot_data.setdefault("km_await", {})[req_id] = problem["vehicle"]
+                await app.bot.send_message(chat_id=req_id, text=f"تم تأكيد إصلاح الفيدانج للمركبة {updated_problem['vehicle']}. الرجاء إدخال الكيلومترات الحالية:")
+                app.bot_data.setdefault("km_await", {})[req_id] = updated_problem["vehicle"]
             except Exception as e:
                 logging.debug(f"Non-critical send failure: {e}")
     return json_ok({"problem_id": problem_id, "ruglee": new_ruglee}, by=admin["user_id"])
@@ -2434,9 +2508,10 @@ async def main():
     app.add_handler(CallbackQueryHandler(done_history_callback, pattern="^done_hist$"))
 
     app.add_error_handler(error_handler)
-    schedule_jobs(app)
     await app.initialize()
+    schedule_jobs(app)
     await app.start()
+    logging.info("Telegram application and JobQueue started successfully")
     await set_webhook(app)
 
     aio_app = web.Application(middlewares=[api_error_middleware])
