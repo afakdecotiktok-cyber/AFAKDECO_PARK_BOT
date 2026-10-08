@@ -1,4 +1,4 @@
-import os, sys, logging, asyncio, secrets, functools
+import os, sys, logging, asyncio, secrets, functools, json
 from datetime import datetime, time, timedelta
 from io import BytesIO
 from zoneinfo import ZoneInfo
@@ -38,10 +38,11 @@ TOPIC_VIDANGE = int(os.environ.get("TOPIC_VIDANGE", "0"))
 TOPIC_VEHICLE_MGMT = int(os.environ.get("TOPIC_VEHICLE_MGMT", "0"))
 TOPIC_GENERAL = int(os.environ.get("TOPIC_GENERAL", "0"))
 TOPIC_HISTORY = int(os.environ.get("TOPIC_HISTORY", "0"))
+TOPIC_ACCIDENT = int(os.environ.get("TOPIC_ACCIDENT", "0"))
 
 if not all([BOT_TOKEN, ADMIN_GROUP_ID_STR, DATABASE_URL, WEBHOOK_URL]):
     sys.exit("FATAL: BOT_TOKEN, ADMIN_GROUP_ID, DATABASE_URL and WEBHOOK_URL must be set.")
-if not all([TOPIC_RECLAMATIONS, TOPIC_VALIDATION, TOPIC_VIDANGE, TOPIC_VEHICLE_MGMT, TOPIC_GENERAL, TOPIC_HISTORY]):
+if not all([TOPIC_RECLAMATIONS, TOPIC_VALIDATION, TOPIC_VIDANGE, TOPIC_VEHICLE_MGMT, TOPIC_GENERAL, TOPIC_HISTORY, TOPIC_ACCIDENT]):
     sys.exit("FATAL: All TOPIC_* environment variables must be set.")
 
 try:
@@ -146,6 +147,15 @@ def init_db():
         ''')
         cur.execute("ALTER TABLE problems ADD COLUMN IF NOT EXISTS validation_requester BIGINT DEFAULT 0")
         cur.execute("ALTER TABLE problems ADD COLUMN IF NOT EXISTS group_message_id BIGINT DEFAULT 0")
+        cur.execute("ALTER TABLE problems ADD COLUMN IF NOT EXISTS problem_type TEXT NOT NULL DEFAULT 'reclamation'")
+        cur.execute("ALTER TABLE problems ADD COLUMN IF NOT EXISTS telegram_chat_id BIGINT")
+        cur.execute("ALTER TABLE problems ADD COLUMN IF NOT EXISTS telegram_thread_id BIGINT")
+        cur.execute("UPDATE problems SET problem_type='vidange' WHERE media_type='نظام' AND problem_type='reclamation'")
+        cur.execute('CREATE TABLE IF NOT EXISTS driver_vehicle_history (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, vehicle TEXT NOT NULL, assigned_from TEXT NOT NULL, assigned_until TEXT)')
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_driver_vehicle_history_user ON driver_vehicle_history(user_id, assigned_from DESC)")
+        cur.execute('CREATE TABLE IF NOT EXISTS problem_media (id BIGSERIAL PRIMARY KEY, problem_id INTEGER NOT NULL REFERENCES problems(id) ON DELETE CASCADE, media_type TEXT NOT NULL, telegram_file_id TEXT, telegram_message_id BIGINT, telegram_chat_id BIGINT, storage_path TEXT, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, archived_at TEXT)')
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_problem_media_problem ON problem_media(problem_id, id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_problem_media_expiry ON problem_media(expires_at)")
         cur.execute('''
             CREATE TABLE IF NOT EXISTS allowed_users (
                 user_id BIGINT PRIMARY KEY,
@@ -215,54 +225,31 @@ def invalidate_cache(vehicle: str):
 def refresh_cache(vehicle: str):
     with db_connection() as conn:
         cur = conn.cursor()
-
-        cur.execute(
-            "SELECT COUNT(*) FROM problems WHERE vehicle=%s AND status='قيد الانتظار' "
-            "AND ruglee != 'تم الإصلاح' AND (media_type IS NULL OR media_type != 'نظام')",
-            (vehicle,)
-        )
+        cur.execute("SELECT COUNT(*) FROM problems WHERE vehicle=%s AND problem_type='accident' AND ruglee != 'تم الإصلاح'", (vehicle,))
+        accident_open = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM problems WHERE vehicle=%s AND status='قيد الانتظار' AND ruglee != 'تم الإصلاح' AND problem_type='reclamation'", (vehicle,))
         pending_normal = cur.fetchone()[0]
-
-        cur.execute(
-            "SELECT COUNT(*) FROM problems WHERE vehicle=%s AND status='قيد التصليح' "
-            "AND ruglee != 'تم الإصلاح' AND (media_type IS NULL OR media_type != 'نظام')",
-            (vehicle,)
-        )
+        cur.execute("SELECT COUNT(*) FROM problems WHERE vehicle=%s AND status='قيد التصليح' AND ruglee != 'تم الإصلاح' AND problem_type='reclamation'", (vehicle,))
         in_progress_normal = cur.fetchone()[0]
-
-        cur.execute(
-            "SELECT COUNT(*) FROM problems WHERE vehicle=%s AND media_type='نظام' AND ruglee != 'تم الإصلاح'",
-            (vehicle,)
-        )
+        cur.execute("SELECT COUNT(*) FROM problems WHERE vehicle=%s AND (problem_type='vidange' OR media_type='نظام') AND ruglee != 'تم الإصلاح'", (vehicle,))
         vidange_open = cur.fetchone()[0]
-
         cur.execute("SELECT km FROM km_readings WHERE vehicle=%s ORDER BY date DESC LIMIT 1", (vehicle,))
         row = cur.fetchone()
         last_km = row[0] if row else None
         last_vid = get_last_vidange_km_noconn(conn, vehicle)
-        if not vidange_open and last_km and last_vid > 0 and last_km >= last_vid + 9000:
+        if not vidange_open and last_km is not None and last_vid > 0 and last_km >= last_vid + 9000:
             vidange_open = 1
-
-        if pending_normal > 0:
-            status = 'bad'
-        elif in_progress_normal > 0:
-            status = 'en_cours'
-        elif vidange_open > 0:
-            status = 'vidange'
-        else:
-            status = 'good'
-
+        icons = []
+        if accident_open: icons.append("accident")
+        if pending_normal: icons.append("pending")
+        if in_progress_normal: icons.append("in_progress")
+        if vidange_open: icons.append("vidange")
+        if not icons: icons = ["normal"]
+        status = 'bad' if pending_normal else ('en_cours' if in_progress_normal else ('vidange' if vidange_open else 'good'))
         cur.execute("SELECT COUNT(*) FROM problems WHERE vehicle=%s AND ruglee != 'تم الإصلاح'", (vehicle,))
         open_count = cur.fetchone()[0]
-        if last_km and last_vid > 0:
-            remaining = (last_vid + 10000) - last_km
-        else:
-            remaining = None
-        vehicle_cache[vehicle] = {
-            "status": status,
-            "open_count": open_count,
-            "remaining_km": remaining
-        }
+        remaining = (last_vid + 10000) - last_km if last_km is not None and last_vid > 0 else None
+        vehicle_cache[vehicle] = {"status": status, "status_icons": icons, "open_count": open_count, "remaining_km": remaining}
 
 def get_vehicle_cache_entry(vehicle: str) -> dict:
     if vehicle in cache_dirty:
@@ -315,20 +302,30 @@ def get_driver(user_id: int) -> dict | None:
 def set_driver(user_id: int, name=None, vehicle=None, state=None, approval_status=None):
     with db_connection() as conn:
         cur = conn.cursor()
-        driver = get_driver(user_id)
+        cur.execute("SELECT name, vehicle, state, approval_status FROM drivers WHERE user_id=%s FOR UPDATE", (user_id,))
+        driver = cur.fetchone()
+        old_vehicle = driver[1] if driver else None
+        now = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
         if driver:
-            if name is not None:
-                cur.execute("UPDATE drivers SET name=%s WHERE user_id=%s", (name, user_id))
-            if vehicle is not None:
-                cur.execute("UPDATE drivers SET vehicle=%s WHERE user_id=%s", (vehicle, user_id))
-            if state is not None:
-                cur.execute("UPDATE drivers SET state=%s WHERE user_id=%s", (state, user_id))
-            if approval_status is not None:
-                cur.execute("UPDATE drivers SET approval_status=%s WHERE user_id=%s", (approval_status, user_id))
+            updates, values = [], []
+            if name is not None: updates += ["name=%s"]; values += [name]
+            if vehicle is not None: updates += ["vehicle=%s"]; values += [vehicle]
+            if state is not None: updates += ["state=%s"]; values += [state]
+            if approval_status is not None: updates += ["approval_status=%s"]; values += [approval_status]
+            if updates:
+                values.append(user_id)
+                cur.execute(f"UPDATE drivers SET {', '.join(updates)} WHERE user_id=%s", values)
         else:
             cur.execute("INSERT INTO drivers (user_id, name, vehicle, state, approval_status) VALUES (%s,%s,%s,%s,%s)",
                         (user_id, name or "", vehicle or "", state or "name_entry", approval_status or "pending"))
+        if vehicle is not None and vehicle != old_vehicle:
+            if old_vehicle:
+                cur.execute("UPDATE driver_vehicle_history SET assigned_until=%s WHERE user_id=%s AND assigned_until IS NULL", (now, user_id))
+            if vehicle:
+                cur.execute("INSERT INTO driver_vehicle_history (user_id, vehicle, assigned_from) VALUES (%s,%s,%s)", (user_id, vehicle, now))
         conn.commit()
+    if old_vehicle: invalidate_cache(old_vehicle)
+    if vehicle: invalidate_cache(vehicle)
 
 def get_all_vehicles():
     with db_connection() as conn:
@@ -351,13 +348,13 @@ def remove_vehicle(code: str):
         conn.commit()
     invalidate_cache(code)
 
-def add_problem(user_id: int, driver_name: str, vehicle: str, problem_text: str, media_type: str, group_msg_id: int = 0) -> int:
+def add_problem(user_id: int, driver_name: str, vehicle: str, problem_text: str, media_type: str, group_msg_id: int = 0, problem_type: str = "reclamation", telegram_chat_id: int = 0, telegram_thread_id: int = 0) -> int:
     with db_connection() as conn:
         cur = conn.cursor()
         date = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
         cur.execute(
-            "INSERT INTO problems (user_id, driver_name, vehicle, problem_text, media_type, date, group_message_id) VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id",
-            (user_id, driver_name, vehicle, problem_text, media_type, date, group_msg_id)
+            "INSERT INTO problems (user_id, driver_name, vehicle, problem_text, media_type, date, group_message_id, problem_type, telegram_chat_id, telegram_thread_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+            (user_id, driver_name, vehicle, problem_text, media_type, date, group_msg_id, problem_type, telegram_chat_id or ADMIN_GROUP_ID, telegram_thread_id or TOPIC_RECLAMATIONS)
         )
         problem_id = cur.fetchone()[0]
         conn.commit()
@@ -414,7 +411,7 @@ def get_vehicle_history(vehicle: str) -> dict:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute("SELECT * FROM problems WHERE vehicle=%s ORDER BY date DESC", (vehicle,))
         problems = [dict(r) for r in cur.fetchall()]
-        cur.execute("SELECT date, km FROM km_readings WHERE vehicle=%s ORDER BY date DESC LIMIT 5", (vehicle,))
+        cur.execute("SELECT date, km, driver_name FROM km_readings WHERE vehicle=%s ORDER BY date DESC", (vehicle,))
         readings = cur.fetchall()
     return {"problems": problems, "readings": readings}
 
@@ -674,12 +671,12 @@ def vehicle_inline_keyboard(vehicles: list, prefix="selv_") -> InlineKeyboardMar
     buttons = [InlineKeyboardButton(v, callback_data=f"{prefix}{v}") for v in vehicles]
     return InlineKeyboardMarkup([buttons[i:i+4] for i in range(0, len(buttons), 4)])
 
+def status_icons_cached(vehicle: str) -> list[str]:
+    return get_vehicle_cache_entry(vehicle).get("status_icons", ["normal"])
+
 def status_emoji_cached(vehicle: str) -> str:
-    s = get_vehicle_status_cached(vehicle)
-    if s == 'bad': return "🔴"
-    if s == 'en_cours': return "🟠"
-    if s == 'vidange': return "⚪"
-    return "🟢"
+    mapping = {"accident":"🟣", "pending":"🔴", "in_progress":"🟠", "vidange":"🔧", "normal":"🟢"}
+    return " ".join(mapping.get(x, "🟢") for x in status_icons_cached(vehicle))
 
 def dashboard_button_text(vehicle: str) -> str:
     emoji = status_emoji_cached(vehicle)
@@ -753,6 +750,10 @@ TOPIC_ACTIONS = {
     ],
     TOPIC_HISTORY: [
         [InlineKeyboardButton("📊 لوحة القيادة", callback_data="admin_dash")],
+    ],
+    TOPIC_ACCIDENT: [
+        [InlineKeyboardButton("📊 لوحة القيادة", callback_data="admin_dash")],
+        [InlineKeyboardButton("📋 تصدير المشاكل", callback_data="admin_export")],
     ],
 }
 
