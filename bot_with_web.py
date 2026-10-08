@@ -2236,31 +2236,72 @@ async def api_auth_verify(request):
     return json_ok({"token": token, "role": admin["role"], "display_name": admin["display_name"], "user_id": user_id})
 
 # ---- لوحة القيادة ----
+def _get_vehicle_drivers(vehicle: str):
+    with db_connection() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT user_id, name, approval_status FROM drivers WHERE vehicle=%s ORDER BY name", (vehicle,))
+        return [dict(x) for x in cur.fetchall()]
+
+def telegram_message_url(chat_id, message_id):
+    if not chat_id or not message_id: return None
+    s = str(chat_id)
+    s = s[4:] if s.startswith("-100") else s.lstrip("-")
+    return f"https://t.me/c/{s}/{message_id}"
+
+def _get_problem_media(problem_id: int):
+    with db_connection() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT id, media_type, telegram_message_id, telegram_chat_id, created_at, expires_at, archived_at FROM problem_media WHERE problem_id=%s ORDER BY id", (problem_id,))
+        return [dict(x) for x in cur.fetchall()]
+
 async def api_dashboard(request):
     await require_auth(request)
     vehicles = await run_db(get_all_vehicles)
     result = []
     for v in vehicles:
         info = await run_db(get_vehicle_cache_entry, v)
-        result.append({
-            "vehicle": v,
-            "status": info["status"],
-            "open_count": info["open_count"],
-            "remaining_km": info["remaining_km"],
-        })
+        result.append({"vehicle": v, "status": info["status"], "status_icons": info.get("status_icons", ["normal"]), "open_count": info["open_count"], "remaining_km": info["remaining_km"], "drivers": await run_db(_get_vehicle_drivers, v)})
     return json_ok(result)
 
-# ---- المشاكل ----
 async def api_problems_list(request):
     await require_auth(request)
     vehicle = request.query.get("vehicle")
     status = request.query.get("status")
+    problem_type = request.query.get("type")
+    date_filter = request.query.get("date")
+    search = (request.query.get("search") or "").strip().lower()
     problems = await run_db(get_all_problems)
-    if vehicle:
-        problems = [p for p in problems if p["vehicle"] == vehicle.upper()]
-    if status:
-        problems = [p for p in problems if p["status"] == status]
-    return json_ok(problems)
+    result = []
+    for p in problems:
+        if vehicle and p["vehicle"] != vehicle.upper(): continue
+        if status and p["status"] != status: continue
+        if problem_type and p.get("problem_type", "reclamation") != problem_type: continue
+        if date_filter and not str(p.get("date") or "").startswith(date_filter): continue
+        if search:
+            hay = " ".join(str(p.get(k) or "") for k in ("vehicle","driver_name","problem_text","comments","problem_type")).lower()
+            if search not in hay: continue
+        p["media"] = await run_db(_get_problem_media, p["id"])
+        for m in p["media"]:
+            m["available_in_app"] = str(m.get("expires_at") or "") >= datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
+            m["telegram_url"] = telegram_message_url(m.get("telegram_chat_id"), m.get("telegram_message_id"))
+        result.append(p)
+    return json_ok(result)
+
+async def api_problem_convert_accident(request):
+    admin = await require_auth(request)
+    problem_id = int(request.match_info["id"])
+    p = await run_db(get_problem, problem_id)
+    if not p: return json_err("المشكلة غير موجودة", status=404)
+    await run_db(_set_problem_type, problem_id, "accident")
+    return json_ok(await run_db(get_problem, problem_id), changed_by=admin["user_id"])
+
+def _set_problem_type(problem_id: int, problem_type: str):
+    with db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE problems SET problem_type=%s, telegram_thread_id=%s WHERE id=%s", (problem_type, TOPIC_ACCIDENT if problem_type == "accident" else TOPIC_RECLAMATIONS, problem_id))
+        conn.commit()
+    p = get_problem(problem_id)
+    if p: invalidate_cache(p["vehicle"])
 
 async def api_problem_fix(request):
     admin = await require_auth(request)
