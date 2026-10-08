@@ -974,6 +974,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     user_id = update.effective_user.id
     text = update.message.text.strip()
+    if context.user_data.get("accident_stage"):
+        return
     driver = await run_db(get_driver, user_id)
     state = driver["state"] if driver else "name_entry"
 
@@ -1174,6 +1176,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
+        return
+    if context.user_data.get("accident_stage"):
         return
     user_id = update.effective_user.id
     driver = await run_db(get_driver, user_id)
