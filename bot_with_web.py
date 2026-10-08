@@ -2480,8 +2480,19 @@ async def api_vidange_set(request):
         km = int(body.get("km"))
     except Exception:
         return json_err("km مطلوب كرقم صحيح")
+    previous = await run_db(get_last_vidange_km, vehicle)
+    latest = await run_db(get_latest_km, vehicle)
+    if km < 0:
+        return json_err("km غير صالح")
     await run_db(set_last_vidange_km, vehicle, km)
-    return json_ok({"vehicle": vehicle, "last_vidange_km": km})
+    return json_ok({
+        "vehicle": vehicle,
+        "previous_last_vidange_km": previous,
+        "last_vidange_km": km,
+        "latest_km": latest,
+        "next_vidange_km": km + 10000,
+        "remaining_km": ((km + 10000) - latest) if latest is not None else None,
+    })
 
 # ---- التصدير ----
 async def api_export_problems(request):
