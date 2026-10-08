@@ -1,0 +1,8 @@
+import 'package:flutter/material.dart';
+import '../services/api.dart';
+import 'home_screen.dart';
+class LoginScreen extends StatefulWidget{const LoginScreen({super.key});@override State<LoginScreen> createState()=>_LoginScreenState();}
+class _LoginScreenState extends State<LoginScreen>{final uid=TextEditingController(),code=TextEditingController();bool loading=false;String? error;
+Future<void> login()async{setState(()=>loading=true);try{await Api.instance.login(uid.text,code.text);if(mounted)Navigator.pushReplacement(context,MaterialPageRoute(builder:(_)=>const HomeScreen()));}catch(e){if(mounted)setState(()=>error=e.toString());}finally{if(mounted)setState(()=>loading=false);}}
+@override Widget build(BuildContext c)=>Scaffold(body:Center(child:ConstrainedBox(constraints:const BoxConstraints(maxWidth:420),child:Card(child:Padding(padding:const EdgeInsets.all(26),child:Column(mainAxisSize:MainAxisSize.min,crossAxisAlignment:CrossAxisAlignment.stretch,children:[const Text('AFAKDECO PARK',style:TextStyle(fontSize:28,fontWeight:FontWeight.w800)),const SizedBox(height:6),const Text('لوحة الإدارة'),const SizedBox(height:24),TextField(controller:uid,keyboardType:TextInputType.number,decoration:const InputDecoration(labelText:'Telegram User ID',border:OutlineInputBorder())),const SizedBox(height:12),TextField(controller:code,keyboardType:TextInputType.number,decoration:const InputDecoration(labelText:'كود التحقق',border:OutlineInputBorder())),if(error!=null)Padding(padding:const EdgeInsets.only(top:10),child:Text(error!,style:const TextStyle(color:Colors.red))),const SizedBox(height:18),FilledButton(onPressed:loading?null:login,child:loading?const SizedBox(height:20,width:20,child:CircularProgressIndicator(strokeWidth:2)):const Text('دخول'))]))))));
+}}
