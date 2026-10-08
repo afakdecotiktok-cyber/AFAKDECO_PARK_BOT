@@ -15,6 +15,7 @@ from openpyxl.utils import get_column_letter
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, PicklePersistence
+import accident_flow
 
 # ----------------------------------------------------------------------
 # Environment variables
@@ -2586,6 +2587,7 @@ async def main():
     global app
     persistence = PicklePersistence(filepath=PERSISTENCE_PATH)
     app = Application.builder().token(BOT_TOKEN).persistence(persistence).build()
+    accident_flow.install(sys.modules[__name__])
 
     # Command handlers
     app.add_handler(CommandHandler("start", start))
