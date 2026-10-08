@@ -214,16 +214,6 @@ async def accident_media(update, context):
         draft["problem_id"] = problem_id
 
     caption = f"🟣 حادث #{problem_id} — {media_type}"
-    sent = await context.bot.send_message(
-        chat_id=MAIN.ADMIN_GROUP_ID,
-        message_thread_id=MAIN.TOPIC_ACCIDENT,
-        text=caption,
-    )
-    # Replace the text placeholder with actual media while preserving the same topic.
-    try:
-        await context.bot.delete_message(chat_id=MAIN.ADMIN_GROUP_ID, message_id=sent.message_id)
-    except Exception:
-        pass
     if media_type == "صورة":
         media_msg = await context.bot.send_photo(
             chat_id=MAIN.ADMIN_GROUP_ID,
@@ -280,7 +270,7 @@ async def accident_media_proxy(request):
     now = _now(MAIN)
     expires = datetime.strptime(media["expires_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=MAIN.TZ)
     if now >= expires:
-        return MAIN.json_response(
+        return MAIN.web.json_response(
             {"ok": True, "archived": True, "available_in_app": False,
              "telegram_url": MAIN.telegram_message_url(media.get("telegram_chat_id"), media.get("telegram_message_id"))}
         )
