@@ -462,6 +462,12 @@ def set_last_vidange_km(vehicle: str, km: int):
     with db_connection() as conn:
         cur = conn.cursor()
         cur.execute("UPDATE vehicle_vidange SET last_vidange_km=%s WHERE vehicle=%s", (km, vehicle))
+        if cur.rowcount == 0:
+            cur.execute(
+                "INSERT INTO vehicle_vidange (vehicle, last_vidange_km) VALUES (%s,%s) "
+                "ON CONFLICT (vehicle) DO UPDATE SET last_vidange_km=EXCLUDED.last_vidange_km",
+                (vehicle, km)
+            )
         conn.commit()
     invalidate_cache(vehicle)
 
@@ -2118,7 +2124,9 @@ async def vehicle_history_callback(update: Update, context: ContextTypes.DEFAULT
         text += "لا توجد مشاكل مسجلة.\n"
     if readings:
         text += "\n🛢️ آخر قراءات العداد:\n"
-        for d, k in readings:
+        for r in readings:
+            d = r["date"]
+            k = r["km"]
             text += f"  {d} - {k} كم\n"
     markup = InlineKeyboardMarkup([[InlineKeyboardButton("تم", callback_data="done_hist")]])
     await context.bot.send_message(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_HISTORY, text=safe_text(text), parse_mode="HTML", reply_markup=markup)
