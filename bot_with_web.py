@@ -2407,6 +2407,32 @@ async def api_driver_delete(request):
     return json_ok({"user_id": user_id, "status": "removed"})
 
 # ---- المركبات ----
+async def api_vehicle_history(request):
+    await require_auth(request)
+    vehicle = request.match_info["vehicle"].upper()
+    history = await run_db(get_vehicle_history, vehicle)
+    last_vid = await run_db(get_last_vidange_km, vehicle)
+    latest = await run_db(get_latest_km, vehicle)
+    history["vidange"] = {
+        "last_vidange_km": last_vid,
+        "next_vidange_km": (last_vid + 10000) if last_vid is not None else None,
+        "latest_km": latest,
+        "remaining_km": ((last_vid + 10000) - latest) if (last_vid is not None and latest is not None) else None,
+    }
+    return json_ok(history)
+
+async def api_driver_history(request):
+    await require_auth(request)
+    user_id = int(request.match_info["user_id"])
+    driver = await run_db(get_driver, user_id)
+    if not driver:
+        return json_err("السائق غير موجود", status=404)
+    with db_connection() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT id, vehicle, assigned_from, assigned_until FROM driver_vehicle_history WHERE user_id=%s ORDER BY assigned_from DESC", (user_id,))
+        assignments = [dict(x) for x in cur.fetchall()]
+    return json_ok({"driver": driver, "assignments": assignments, "problems": await run_db(get_driver_problems, user_id)})
+
 async def api_vehicles_list(request):
     await require_auth(request)
     vehicles = await run_db(get_all_vehicles)
@@ -2522,13 +2548,16 @@ def register_api_routes(api: web.Application):
     api.router.add_post("/api/auth/verify", api_auth_verify)
     api.router.add_get("/api/dashboard", api_dashboard)
     api.router.add_get("/api/problems", api_problems_list)
+    api.router.add_post("/api/problems/{id}/accident", api_problem_convert_accident)
     api.router.add_post("/api/problems/{id}/fix", api_problem_fix)
     api.router.add_post("/api/problems/{id}/comment", api_problem_comment)
     api.router.add_delete("/api/problems/{id}", api_problem_delete)
+    api.router.add_get("/api/drivers/{user_id}", api_driver_history)
     api.router.add_get("/api/drivers", api_drivers_list)
     api.router.add_post("/api/drivers/{user_id}/approve", api_driver_approve)
     api.router.add_post("/api/drivers/{user_id}/reject", api_driver_reject)
     api.router.add_delete("/api/drivers/{user_id}", api_driver_delete)
+    api.router.add_get("/api/vehicles/{vehicle}/history", api_vehicle_history)
     api.router.add_get("/api/vehicles", api_vehicles_list)
     api.router.add_post("/api/vehicles", api_vehicle_add)
     api.router.add_delete("/api/vehicles/{code}", api_vehicle_remove)
