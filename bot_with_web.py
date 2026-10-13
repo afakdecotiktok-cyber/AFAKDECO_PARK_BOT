@@ -2226,6 +2226,15 @@ async def require_auth(request, min_role: str = "admin"):
     return admin
 
 # ---- المصادقة ----
+async def api_auth_session(request):
+    """Validate the caller's JWT and return current admin details."""
+    admin = await require_auth(request)
+    return json_ok({
+        "user_id": admin["user_id"],
+        "role": admin["role"],
+        "display_name": admin.get("display_name") or "",
+    })
+
 async def api_auth_verify(request):
     try:
         body = await request.json()
@@ -2570,6 +2579,7 @@ async def api_error_middleware(request, handler):
 
 def register_api_routes(api: web.Application):
     api.router.add_post("/api/auth/verify", api_auth_verify)
+    api.router.add_get("/api/auth/session", api_auth_session)
     api.router.add_get("/api/dashboard", api_dashboard)
     api.router.add_get("/api/problems", api_problems_list)
     api.router.add_post("/api/problems/{id}/accident", api_problem_convert_accident)
