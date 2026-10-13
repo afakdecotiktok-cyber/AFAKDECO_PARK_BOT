@@ -106,6 +106,33 @@ class Api {
   Future<void> convertAccident(int id) async =>
       request('POST', '/api/problems/$id/accident');
 
+  Future<List<dynamic>> vehicles() async =>
+      List<dynamic>.from((await request('GET', '/api/vehicles'))['data'] ?? []);
+
+  Future<void> addVehicle(String code) async =>
+      request('POST', '/api/vehicles', body: {'code': code});
+
+  Future<void> removeVehicle(String code) async =>
+      request('DELETE', '/api/vehicles/${Uri.encodeComponent(code)}');
+
+  Future<List<dynamic>> admins() async =>
+      List<dynamic>.from((await request('GET', '/api/admins'))['data'] ?? []);
+
+  Future<void> addAdmin(String userId) async =>
+      request('POST', '/api/admins', body: {'user_id': int.tryParse(userId)});
+
+  Future<void> removeAdmin(String userId) async =>
+      request('DELETE', '/api/admins/${Uri.encodeComponent(userId)}');
+
+  Future<void> approveDriver(String userId) async =>
+      request('POST', '/api/drivers/${Uri.encodeComponent(userId)}/approve');
+
+  Future<void> rejectDriver(String userId) async =>
+      request('POST', '/api/drivers/${Uri.encodeComponent(userId)}/reject');
+
+  Future<void> removeDriver(String userId) async =>
+      request('DELETE', '/api/drivers/${Uri.encodeComponent(userId)}');
+
   Future<Map<String, dynamic>> setVidange(String vehicle, int km) async {
     final response = await request(
       'POST',
