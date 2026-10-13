@@ -186,7 +186,7 @@ class _ProblemsScreenState extends State<ProblemsScreen> {
       isScrollControlled: true,
       showDragHandle: true,
       builder: (sheetContext) => Directionality(
-        textDirection: const TextDirection.values[1],
+        textDirection: TextDirection.values[1],
         child: SafeArea(
           child: Padding(
             padding: EdgeInsets.only(
