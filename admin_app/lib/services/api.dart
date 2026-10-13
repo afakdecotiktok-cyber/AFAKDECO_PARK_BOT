@@ -119,7 +119,7 @@ class Api {
       List<dynamic>.from((await request('GET', '/api/admins'))['data'] ?? []);
 
   Future<void> addAdmin(String userId) async =>
-      request('POST', '/api/admins', body: {'user_id': int.tryParse(userId)});
+      request('POST', '/api/admins', body: {'telegram_user_id': int.tryParse(userId)});
 
   Future<void> removeAdmin(String userId) async =>
       request('DELETE', '/api/admins/${Uri.encodeComponent(userId)}');
