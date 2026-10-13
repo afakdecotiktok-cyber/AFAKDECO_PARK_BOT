@@ -30,6 +30,9 @@ jobs:
       - name: Show Flutter environment
         run: flutter doctor -v
 
+      - name: Generate Android platform project
+        run: flutter create --platforms=android --project-name afakdeco_admin --org com.afakdeco .
+
       - name: Install dependencies
         run: flutter pub get
 
