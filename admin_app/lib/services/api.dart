@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -6,25 +7,77 @@ class Api {
   Api._();
   static final instance = Api._();
   static const baseUrl = 'https://afakdeco-park-bot.onrender.com';
+  static const FlutterSecureStorage _secureStorage = FlutterSecureStorage();
 
-  Future<SharedPreferences> get _p async => SharedPreferences.getInstance();
-  Future<bool> hasToken() async =>
-      (await _p).getString('jwt')?.isNotEmpty == true;
+  // Migrate existing sessions from SharedPreferences without forcing users
+  // to sign in again. JWTs are kept in secure storage after this one-time move.
+  Future<String?> _token() async {
+    final secureToken = await _secureStorage.read(key: 'jwt');
+    if (secureToken != null && secureToken.isNotEmpty) return secureToken;
 
-  Future<void> saveAuth(Map<String, dynamic> d) async {
-    final p = await _p;
-    await p.setString('jwt', d['token'].toString());
-    await p.setString('role', '${d['role'] ?? ''}');
-    await p.setString('display_name', '${d['display_name'] ?? ''}');
+    final prefs = await SharedPreferences.getInstance();
+    final legacyToken = prefs.getString('jwt');
+    if (legacyToken == null || legacyToken.isEmpty) return null;
+
+    await _secureStorage.write(key: 'jwt', value: legacyToken);
+    for (final key in const ['role', 'display_name', 'user_id']) {
+      final value = prefs.getString(key);
+      if (value != null) {
+        await _secureStorage.write(key: key, value: value);
+      }
+      await prefs.remove(key);
+    }
+    await prefs.remove('jwt');
+    return legacyToken;
   }
 
-  Future<void> logout() async => (await _p).clear();
+  Future<bool> hasToken() async {
+    final token = await _token();
+    if (token == null || token.isEmpty) return false;
 
-  Future<Map<String, String>> _h() async {
-    final t = (await _p).getString('jwt');
+    try {
+      await request('GET', '/api/auth/session');
+      return true;
+    } catch (_) {
+      // Preserve a session if the server is temporarily unreachable. A 401
+      // clears the token in request(), so it will return false below.
+      final remainingToken = await _token();
+      return remainingToken != null && remainingToken.isNotEmpty;
+    }
+  }
+
+  Future<void> saveAuth(Map<String, dynamic> data) async {
+    await _secureStorage.write(key: 'jwt', value: data['token'].toString());
+    await _secureStorage.write(key: 'role', value: '${data['role'] ?? ''}');
+    await _secureStorage.write(
+      key: 'display_name',
+      value: '${data['display_name'] ?? ''}',
+    );
+    await _secureStorage.write(key: 'user_id', value: '${data['user_id'] ?? ''}');
+    // Remove any legacy copies after successful secure storage.
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('jwt');
+    await prefs.remove('role');
+    await prefs.remove('display_name');
+    await prefs.remove('user_id');
+  }
+
+  Future<void> logout() async {
+    for (final key in const ['jwt', 'role', 'display_name', 'user_id']) {
+      await _secureStorage.delete(key: key);
+    }
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('jwt');
+    await prefs.remove('role');
+    await prefs.remove('display_name');
+    await prefs.remove('user_id');
+  }
+
+  Future<Map<String, String>> _headers() async {
+    final token = await _token();
     return {
       'Content-Type': 'application/json',
-      if (t != null) 'Authorization': 'Bearer $t',
+      if (token != null && token.isNotEmpty) 'Authorization': 'Bearer $token',
     };
   }
 
@@ -33,38 +86,43 @@ class Api {
     String path, {
     Map<String, dynamic>? body,
   }) async {
-    final u = Uri.parse(baseUrl + path);
-    final h = await _h();
-    late http.Response r;
+    final uri = Uri.parse(baseUrl + path);
+    final headers = await _headers();
+    late http.Response response;
     if (method == 'GET') {
-      r = await http.get(u, headers: h);
+      response = await http.get(uri, headers: headers);
     } else if (method == 'POST') {
-      r = await http.post(u, headers: h, body: jsonEncode(body ?? {}));
+      response = await http.post(
+        uri,
+        headers: headers,
+        body: jsonEncode(body ?? {}),
+      );
     } else {
-      r = await http.delete(u, headers: h);
+      response = await http.delete(uri, headers: headers);
     }
-    dynamic d;
+
+    dynamic data;
     try {
-      d = jsonDecode(r.body);
+      data = jsonDecode(response.body);
     } catch (_) {
-      d = {'ok': false, 'error': r.body};
+      data = {'ok': false, 'error': response.body};
     }
-    if (r.statusCode == 401) {
+    if (response.statusCode == 401) {
       await logout();
       throw Exception('انتهت جلسة الدخول، سجّل الدخول مجدداً');
     }
-    if (r.statusCode >= 400 || (d is Map && d['ok'] == false)) {
-      throw Exception(d is Map ? (d['error'] ?? 'حدث خطأ') : 'حدث خطأ');
+    if (response.statusCode >= 400 || (data is Map && data['ok'] == false)) {
+      throw Exception(data is Map ? (data['error'] ?? 'حدث خطأ') : 'حدث خطأ');
     }
-    return d;
+    return data;
   }
 
   Future<void> login(String uid, String code) async {
-    final d = await request('POST', '/api/auth/verify', body: {
+    final data = await request('POST', '/api/auth/verify', body: {
       'telegram_user_id': int.tryParse(uid),
       'code': code.trim(),
     });
-    await saveAuth(Map<String, dynamic>.from(d['data']));
+    await saveAuth(Map<String, dynamic>.from(data['data']));
   }
 
   Future<List<dynamic>> dashboard() async =>
@@ -78,30 +136,32 @@ class Api {
     String? date,
     String? search,
   }) async {
-    final q = <String, String>{};
-    if (type != null && type != 'all') q['type'] = type;
-    if (date != null) q['date'] = date;
-    if (search != null && search.isNotEmpty) q['search'] = search;
-    final path = Uri(path: '/api/problems', queryParameters: q).toString();
+    final query = <String, String>{};
+    if (type != null && type != 'all') query['type'] = type;
+    if (date != null) query['date'] = date;
+    if (search != null && search.isNotEmpty) query['search'] = search;
+    final path = Uri(path: '/api/problems', queryParameters: query).toString();
     return List<dynamic>.from((await request('GET', path))['data'] ?? []);
   }
 
-  Future<Map<String, dynamic>> vehicleHistory(String v) async =>
+  Future<Map<String, dynamic>> vehicleHistory(String vehicle) async =>
       Map<String, dynamic>.from(
         (await request(
           'GET',
-          '/api/vehicles/${Uri.encodeComponent(v)}/history',
+          '/api/vehicles/${Uri.encodeComponent(vehicle)}/history',
         ))['data'],
       );
 
   Future<Map<String, dynamic>> driverHistory(String id) async =>
-      Map<String, dynamic>.from((await request('GET', '/api/drivers/$id'))['data']);
+      Map<String, dynamic>.from(
+        (await request('GET', '/api/drivers/$id'))['data'],
+      );
 
   Future<void> fixProblem(int id) async =>
       request('POST', '/api/problems/$id/fix');
 
-  Future<void> commentProblem(int id, String c) async =>
-      request('POST', '/api/problems/$id/comment', body: {'comment': c});
+  Future<void> commentProblem(int id, String comment) async =>
+      request('POST', '/api/problems/$id/comment', body: {'comment': comment});
 
   Future<void> convertAccident(int id) async =>
       request('POST', '/api/problems/$id/accident');
