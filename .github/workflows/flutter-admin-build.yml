@@ -33,6 +33,21 @@ jobs:
       - name: Generate Android platform project
         run: |
           flutter create --platforms=android --project-name afakdeco_admin --org com.afakdeco .
+          python3 - <<'PY'
+          from pathlib import Path
+
+          manifest = Path("android/app/src/main/AndroidManifest.xml")
+          content = manifest.read_text()
+          permission = '    <uses-permission android:name="android.permission.INTERNET" />'
+          if permission not in content:
+              application_tag = '    <application'
+              if application_tag not in content:
+                  raise SystemExit("Could not find <application> in AndroidManifest.xml")
+              content = content.replace(application_tag, f"{permission}\\n{application_tag}", 1)
+              manifest.write_text(content)
+          print("Verified INTERNET permission in AndroidManifest.xml")
+          PY
+          grep -q 'android.permission.INTERNET' android/app/src/main/AndroidManifest.xml
           rm -f test/widget_test.dart
 
       - name: Install dependencies
