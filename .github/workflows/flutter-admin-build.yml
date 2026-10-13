@@ -31,18 +31,18 @@ jobs:
         run: flutter doctor -v
 
       - name: Generate Android platform project
-        run: flutter create --platforms=android --project-name afakdeco_admin --org com.afakdeco .
+        run: |
+          flutter create --platforms=android --project-name afakdeco_admin --org com.afakdeco .
+          rm -f test/widget_test.dart
 
       - name: Install dependencies
         run: flutter pub get
 
       - name: Analyze Dart code
         run: flutter analyze --no-pub
-        continue-on-error: true
 
       - name: Run Flutter tests
         run: flutter test --no-pub
-        continue-on-error: true
 
       - name: Build release APK
         run: flutter build apk --release
