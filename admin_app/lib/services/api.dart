@@ -73,6 +73,43 @@ class Api {
     await prefs.remove('user_id');
   }
 
+  // Cache GET responses for offline/read-only fallback. Fresh network data always wins.
+  Future<dynamic> _getWithCache(String path) async {
+    final prefs = await SharedPreferences.getInstance();
+    final key = 'api_cache:$path';
+    try {
+      final fresh = await request('GET', path);
+      await prefs.setString(key, jsonEncode({
+        'cached_at': DateTime.now().millisecondsSinceEpoch,
+        'value': fresh,
+      }));
+      return fresh;
+    } catch (_) {
+      // Never use cached data after the server explicitly invalidates the session.
+      if (await _token() == null) rethrow;
+      final raw = prefs.getString(key);
+      if (raw == null) rethrow;
+      try {
+        final entry = Map<String, dynamic>.from(jsonDecode(raw));
+        final cachedAt = int.tryParse('${entry['cached_at']}') ?? 0;
+        final age = DateTime.now().millisecondsSinceEpoch - cachedAt;
+        if (age < const Duration(hours: 24).inMilliseconds) {
+          return entry['value'];
+        }
+      } catch (_) {
+        await prefs.remove(key);
+      }
+      rethrow;
+    }
+  }
+
+  Future<void> clearApiCache() async {
+    final prefs = await SharedPreferences.getInstance();
+    for (final key in prefs.getKeys().where((k) => k.startsWith('api_cache:')).toList()) {
+      await prefs.remove(key);
+    }
+  }
+
   Future<Map<String, String>> _headers() async {
     final token = await _token();
     return {
@@ -114,6 +151,7 @@ class Api {
     if (response.statusCode >= 400 || (data is Map && data['ok'] == false)) {
       throw Exception(data is Map ? (data['error'] ?? 'حدث خطأ') : 'حدث خطأ');
     }
+    if (method != 'GET') await clearApiCache();
     return data;
   }
 
@@ -126,10 +164,10 @@ class Api {
   }
 
   Future<List<dynamic>> dashboard() async =>
-      List<dynamic>.from((await request('GET', '/api/dashboard'))['data'] ?? []);
+      List<dynamic>.from((await _getWithCache('/api/dashboard'))['data'] ?? []);
 
   Future<List<dynamic>> drivers() async =>
-      List<dynamic>.from((await request('GET', '/api/drivers'))['data'] ?? []);
+      List<dynamic>.from((await _getWithCache('/api/drivers'))['data'] ?? []);
 
   Future<List<dynamic>> problems({
     String? type,
@@ -141,33 +179,38 @@ class Api {
     if (date != null) query['date'] = date;
     if (search != null && search.isNotEmpty) query['search'] = search;
     final path = Uri(path: '/api/problems', queryParameters: query).toString();
-    return List<dynamic>.from((await request('GET', path))['data'] ?? []);
+    return List<dynamic>.from((await _getWithCache(path))['data'] ?? []);
   }
 
   Future<Map<String, dynamic>> vehicleHistory(String vehicle) async =>
       Map<String, dynamic>.from(
-        (await request(
-          'GET',
+        (await _getWithCache(
           '/api/vehicles/${Uri.encodeComponent(vehicle)}/history',
         ))['data'],
       );
 
   Future<Map<String, dynamic>> driverHistory(String id) async =>
       Map<String, dynamic>.from(
-        (await request('GET', '/api/drivers/$id'))['data'],
+        (await _getWithCache('/api/drivers/$id'))['data'],
       );
 
   Future<void> fixProblem(int id) async =>
       request('POST', '/api/problems/$id/fix');
 
   Future<void> commentProblem(int id, String comment) async =>
-      request('POST', '/api/problems/$id/comment', body: {'comment': comment});
+      request('POST', '/api/problems/$id/comment', body: {'text': comment});
 
   Future<void> convertAccident(int id) async =>
       request('POST', '/api/problems/$id/accident');
 
   Future<List<dynamic>> vehicles() async =>
-      List<dynamic>.from((await request('GET', '/api/vehicles'))['data'] ?? []);
+      List<dynamic>.from((await _getWithCache('/api/vehicles'))['data'] ?? []);
+
+  Future<List<dynamic>> vidange() async =>
+      List<dynamic>.from((await _getWithCache('/api/vidange'))['data'] ?? []);
+
+  Future<Map<String, dynamic>> profile() async =>
+      Map<String, dynamic>.from((await request('GET', '/api/auth/session'))['data'] ?? {});
 
   Future<void> addVehicle(String code) async =>
       request('POST', '/api/vehicles', body: {'code': code});
@@ -176,7 +219,7 @@ class Api {
       request('DELETE', '/api/vehicles/${Uri.encodeComponent(code)}');
 
   Future<List<dynamic>> admins() async =>
-      List<dynamic>.from((await request('GET', '/api/admins'))['data'] ?? []);
+      List<dynamic>.from((await _getWithCache('/api/admins'))['data'] ?? []);
 
   Future<void> addAdmin(String userId) async =>
       request('POST', '/api/admins', body: {'telegram_user_id': int.tryParse(userId)});
