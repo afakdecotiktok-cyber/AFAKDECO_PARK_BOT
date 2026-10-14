@@ -224,7 +224,7 @@ class Api {
       request('DELETE', '/api/vehicles/${Uri.encodeComponent(code)}');
 
   Future<List<dynamic>> admins() async =>
-      List<dynamic>.from((await _getWithCache('/api/admins'))['data'] ?? []);
+      List<dynamic>.from((await request('GET', '/api/admins'))['data'] ?? []);
 
   Future<void> addAdmin(String userId) async =>
       request('POST', '/api/admins', body: {'telegram_user_id': int.tryParse(userId)});
