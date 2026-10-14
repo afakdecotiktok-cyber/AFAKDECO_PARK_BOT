@@ -110,6 +110,11 @@ class Api {
     }
   }
 
+  Future<Map<String, String>> mediaHeaders() => _headers();
+
+  String mediaUrl(int problemId, int mediaId) =>
+      '$baseUrl/api/problems/$problemId/media/$mediaId';
+
   Future<Map<String, String>> _headers() async {
     final token = await _token();
     return {
