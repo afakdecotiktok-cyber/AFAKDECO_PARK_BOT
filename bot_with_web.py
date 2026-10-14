@@ -362,6 +362,19 @@ def add_problem(user_id: int, driver_name: str, vehicle: str, problem_text: str,
     invalidate_cache(vehicle)
     return problem_id
 
+def save_problem_media(problem_id: int, media_type: str, telegram_file_id: str, telegram_message_id: int, telegram_chat_id: int = ADMIN_GROUP_ID):
+    """Keep Telegram as the durable media source and index the original admin-topic message."""
+    now = datetime.now(TZ)
+    created_at = now.strftime("%Y-%m-%d %H:%M:%S")
+    expires_at = (now + timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+    with db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO problem_media (problem_id, media_type, telegram_file_id, telegram_message_id, telegram_chat_id, created_at, expires_at) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+            (problem_id, media_type, telegram_file_id, telegram_message_id, telegram_chat_id, created_at, expires_at)
+        )
+        conn.commit()
+
 def update_problem_status(problem_id: int, status=None, ruglee=None, validation_requester=None, group_message_id=None):
     with db_connection() as conn:
         cur = conn.cursor()
@@ -1192,6 +1205,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = await context.bot.send_photo(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_RECLAMATIONS, photo=file_id,
                                            caption=header, reply_markup=build_problem_keyboard(0))
         problem_id = await run_db(add_problem, user_id, driver["name"], driver["vehicle"], caption, media_type, group_msg_id=msg.message_id)
+        await run_db(save_problem_media, problem_id, media_type, file_id, msg.message_id, ADMIN_GROUP_ID)
         await msg.edit_reply_markup(reply_markup=await run_db(build_problem_keyboard, problem_id))
     elif update.message.video:
         file_id = update.message.video.file_id
@@ -1199,6 +1213,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = await context.bot.send_video(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_RECLAMATIONS, video=file_id,
                                            caption=header, reply_markup=build_problem_keyboard(0))
         problem_id = await run_db(add_problem, user_id, driver["name"], driver["vehicle"], caption, media_type, group_msg_id=msg.message_id)
+        await run_db(save_problem_media, problem_id, media_type, file_id, msg.message_id, ADMIN_GROUP_ID)
         await msg.edit_reply_markup(reply_markup=await run_db(build_problem_keyboard, problem_id))
     elif update.message.voice:
         file_id = update.message.voice.file_id
@@ -1206,6 +1221,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = await context.bot.send_voice(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_RECLAMATIONS, voice=file_id,
                                            caption=header, reply_markup=build_problem_keyboard(0))
         problem_id = await run_db(add_problem, user_id, driver["name"], driver["vehicle"], caption, media_type, group_msg_id=msg.message_id)
+        await run_db(save_problem_media, problem_id, media_type, file_id, msg.message_id, ADMIN_GROUP_ID)
         await msg.edit_reply_markup(reply_markup=await run_db(build_problem_keyboard, problem_id))
     await update.message.reply_text("تم إرسال الشكوى.", reply_markup=MAIN_KEYBOARD)
 
@@ -2354,7 +2370,8 @@ async def api_problem_comment(request):
         body = await request.json()
     except Exception:
         return json_err("invalid JSON body")
-    text = (body.get("text") or "").strip()
+    # Accept both the current app field ("comment") and legacy clients ("text").
+    text = (body.get("comment") or body.get("text") or "").strip()
     if not text:
         return json_err("النص مطلوب")
     problem = await run_db(get_problem, problem_id)
@@ -2433,6 +2450,11 @@ async def api_vehicle_history(request):
     await require_auth(request)
     vehicle = request.match_info["vehicle"].upper()
     history = await run_db(get_vehicle_history, vehicle)
+    for p in history.get("problems", []):
+        p["media"] = await run_db(_get_problem_media, p["id"])
+        for m in p["media"]:
+            m["available_in_app"] = str(m.get("expires_at") or "") >= datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
+            m["telegram_url"] = telegram_message_url(m.get("telegram_chat_id"), m.get("telegram_message_id"))
     last_vid = await run_db(get_last_vidange_km, vehicle)
     latest = await run_db(get_latest_km, vehicle)
     history["vidange"] = {
