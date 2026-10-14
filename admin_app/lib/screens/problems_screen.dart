@@ -142,7 +142,8 @@ class _ProblemsScreenState extends State<ProblemsScreen> {
                             itemBuilder: (_, i) {
                               final p = Map<String, dynamic>.from(items[i]);
                               final accident = p['problem_type'] == 'accident';
-                              final status = p['status'] == 'قيد التصليح' ? 'in_progress' : 'pending';
+                              final fixed = p['ruglee'] == 'تم الإصلاح';
+                              final status = fixed ? 'normal' : p['status'] == 'قيد التصليح' ? 'in_progress' : 'pending';
                               final media = List<dynamic>.from(p['media'] ?? []);
                               return Card(
                                 clipBehavior: Clip.antiAlias,
@@ -205,7 +206,7 @@ class _ProblemsScreenState extends State<ProblemsScreen> {
                   _detail('المركبة', p['vehicle']),
                   _detail('السائق', p['driver_name']),
                   _detail('التاريخ', p['date']),
-                  _detail('الحالة', p['status']),
+                  _detail('الحالة', p['ruglee'] == 'تم الإصلاح' ? 'تم الإصلاح' : p['status']),
                   _detail('النوع', p['problem_type'] == 'accident' ? 'حادث' : p['problem_type'] == 'vidange' ? 'Vidange' : 'شكوى'),
                   const SizedBox(height: 8),
                   const Text('الوصف', style: TextStyle(fontWeight: FontWeight.bold)),
@@ -291,19 +292,73 @@ class _ProblemsScreenState extends State<ProblemsScreen> {
                       icon: const Icon(Icons.warning_amber_rounded, color: Color(0xFF7B3FF2)),
                       label: const Text('تحويل هذا السجل إلى حادث'),
                     ),
-                  OutlinedButton.icon(
-                    onPressed: () async {
-                      try {
-                        await Api.instance.fixProblem(id);
-                        if (sheetContext.mounted) Navigator.pop(sheetContext);
-                        await load();
-                      } catch (e) {
-                        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر تسجيل الإصلاح: $e')));
-                      }
-                    },
-                    icon: const Icon(Icons.check_circle_outline),
-                    label: const Text('تسجيل الإصلاح'),
-                  ),
+                  if (p['ruglee'] != 'تم الإصلاح')
+                    OutlinedButton.icon(
+                      onPressed: () async {
+                        final nextStatus = p['status'] == 'قيد التصليح' ? 'قيد الانتظار' : 'قيد التصليح';
+                        try {
+                          await Api.instance.setProblemStatus(id, nextStatus);
+                          if (sheetContext.mounted) Navigator.pop(sheetContext);
+                          await load();
+                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text(nextStatus == 'قيد التصليح' ? 'تم نقل الشكوى إلى قيد المعالجة' : 'تمت إعادة الشكوى إلى قيد الانتظار')),
+                          );
+                        } catch (e) {
+                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر تحديث الحالة: $e')));
+                        }
+                      },
+                      icon: Icon(p['status'] == 'قيد التصليح' ? Icons.undo : Icons.build_outlined),
+                      label: Text(p['status'] == 'قيد التصليح' ? 'إعادة إلى En attente' : 'En cours de traitement'),
+                    ),
+                  if (p['ruglee'] != 'تم الإصلاح' && p['status'] == 'قيد التصليح')
+                    OutlinedButton.icon(
+                      onPressed: () async {
+                        try {
+                          await Api.instance.fixProblem(id);
+                          if (sheetContext.mounted) Navigator.pop(sheetContext);
+                          await load();
+                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم تسجيل الإصلاح')));
+                        } catch (e) {
+                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر تسجيل الإصلاح: $e')));
+                        }
+                      },
+                      icon: const Icon(Icons.check_circle_outline),
+                      label: const Text('Mark as fixed / تم الإصلاح'),
+                    ),
+                  if (p['ruglee'] == 'تم الإصلاح')
+                    const ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(Icons.check_circle, color: Colors.green),
+                      title: Text('تم الإصلاح'),
+                    ),
+                  if (p['ruglee'] != 'تم الإصلاح')
+                    OutlinedButton.icon(
+                      style: OutlinedButton.styleFrom(foregroundColor: Colors.red),
+                      onPressed: () async {
+                        final confirmed = await showDialog<bool>(
+                          context: sheetContext,
+                          builder: (dialogContext) => AlertDialog(
+                            title: const Text('حذف الشكوى؟'),
+                            content: const Text('سيتم حذف هذا السجل من قاعدة البيانات.'),
+                            actions: [
+                              TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('إلغاء')),
+                              FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('حذف')),
+                            ],
+                          ),
+                        );
+                        if (confirmed != true) return;
+                        try {
+                          await Api.instance.deleteProblem(id);
+                          if (sheetContext.mounted) Navigator.pop(sheetContext);
+                          await load();
+                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم حذف الشكوى')));
+                        } catch (e) {
+                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر حذف الشكوى: $e')));
+                        }
+                      },
+                      icon: const Icon(Icons.delete_outline),
+                      label: const Text('Delete / حذف'),
+                    ),
                 ],
               ),
             ),
