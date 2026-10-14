@@ -2292,6 +2292,16 @@ def _get_problem_media(problem_id: int):
         cur.execute("SELECT id, media_type, telegram_message_id, telegram_chat_id, created_at, expires_at, archived_at FROM problem_media WHERE problem_id=%s ORDER BY id", (problem_id,))
         return [dict(x) for x in cur.fetchall()]
 
+def get_problem_media_file(problem_id: int, media_id: int):
+    with db_connection() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            "SELECT id, telegram_file_id, media_type, expires_at FROM problem_media WHERE problem_id=%s AND id=%s",
+            (problem_id, media_id),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
 def _problem_media_for_api(problem: dict, media_rows: list) -> list:
     rows = [dict(m) for m in media_rows]
     # Older reports predate the media index; keep their original Telegram message reachable.
@@ -2319,6 +2329,29 @@ async def api_dashboard(request):
         info = await run_db(get_vehicle_cache_entry, v)
         result.append({"vehicle": v, "status": info["status"], "status_icons": info.get("status_icons", ["normal"]), "open_count": info["open_count"], "remaining_km": info["remaining_km"], "drivers": await run_db(_get_vehicle_drivers, v)})
     return json_ok(result)
+
+async def api_problem_media_file(request):
+    await require_auth(request)
+    try:
+        problem_id = int(request.match_info["id"])
+        media_id = int(request.match_info["media_id"])
+    except (TypeError, ValueError):
+        return json_err("معرّف الوسائط غير صالح", status=400)
+    media = await run_db(get_problem_media_file, problem_id, media_id)
+    if not media or not media.get("telegram_file_id"):
+        return json_err("الوسائط غير متاحة داخل التطبيق؛ افتح الرسالة الأصلية في Telegram", status=404)
+    expires_at = str(media.get("expires_at") or "")
+    if not expires_at or expires_at < datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S"):
+        return json_err("انتهت مدة الاحتفاظ بالوسائط داخل التطبيق؛ افتحها من Telegram", status=410)
+    telegram_file = await app.bot.get_file(media["telegram_file_id"])
+    content = await telegram_file.download_as_bytearray()
+    media_type = media.get("media_type")
+    content_type = "image/jpeg" if media_type == "صورة" else ("video/mp4" if media_type == "فيديو" else "audio/ogg")
+    return web.Response(
+        body=bytes(content),
+        content_type=content_type,
+        headers={"Cache-Control": "private, max-age=300", "X-Content-Type-Options": "nosniff"},
+    )
 
 async def api_problems_list(request):
     await require_auth(request)
@@ -2553,6 +2586,24 @@ async def api_vidange_set(request):
         "remaining_km": ((km + 10000) - latest) if latest is not None else None,
     })
 
+async def api_fix_latest_km(request):
+    await require_auth(request, min_role="super_admin")
+    vehicle = request.match_info["vehicle"].upper()
+    try:
+        body = await request.json()
+        corrected_km = int(body.get("km"))
+    except Exception:
+        return json_err("km مطلوب كرقم صحيح")
+    if corrected_km <= 0:
+        return json_err("القيمة يجب أن تكون أكبر من صفر")
+    vehicles = await run_db(get_all_vehicles)
+    if vehicle not in vehicles:
+        return json_err("المركبة غير موجودة", status=404)
+    success, old_km = await run_db(fix_latest_km_reading, vehicle, corrected_km)
+    if not success:
+        return json_err("لا توجد قراءة عداد مسجلة لهذه المركبة", status=404)
+    return json_ok({"vehicle": vehicle, "previous_km": old_km, "corrected_km": corrected_km})
+
 # ---- التصدير ----
 async def api_export_problems(request):
     await require_auth(request)
@@ -2619,6 +2670,7 @@ def register_api_routes(api: web.Application):
     api.router.add_get("/api/auth/session", api_auth_session)
     api.router.add_get("/api/dashboard", api_dashboard)
     api.router.add_get("/api/problems", api_problems_list)
+    api.router.add_get("/api/problems/{id}/media/{media_id}", api_problem_media_file)
     api.router.add_post("/api/problems/{id}/accident", api_problem_convert_accident)
     api.router.add_post("/api/problems/{id}/fix", api_problem_fix)
     api.router.add_post("/api/problems/{id}/comment", api_problem_comment)
@@ -2634,6 +2686,7 @@ def register_api_routes(api: web.Application):
     api.router.add_delete("/api/vehicles/{code}", api_vehicle_remove)
     api.router.add_get("/api/vidange", api_vidange_list)
     api.router.add_post("/api/vidange/{vehicle}/set", api_vidange_set)
+    api.router.add_post("/api/vehicles/{vehicle}/fix-km", api_fix_latest_km)
     api.router.add_get("/api/export/problems", api_export_problems)
     api.router.add_get("/api/export/vidange", api_export_vidange)
     api.router.add_get("/api/admins", api_admins_list)
