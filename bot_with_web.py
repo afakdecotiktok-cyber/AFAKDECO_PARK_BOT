@@ -2251,6 +2251,32 @@ async def api_auth_session(request):
         "display_name": admin.get("display_name") or "",
     })
 
+def update_admin_display_name(user_id: int, display_name: str):
+    with db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE admins SET display_name=%s WHERE user_id=%s", (display_name, user_id))
+        changed = cur.rowcount
+        conn.commit()
+    return changed > 0
+
+async def api_auth_profile_update(request):
+    admin = await require_auth(request)
+    try:
+        body = await request.json()
+    except Exception:
+        return json_err("invalid JSON body")
+    display_name = str(body.get("display_name") or "").strip()
+    if len(display_name) < 2 or len(display_name) > 60:
+        return json_err("الاسم يجب أن يكون بين حرفين و60 حرفاً")
+    updated = await run_db(update_admin_display_name, int(admin["user_id"]), display_name)
+    if not updated:
+        return json_err("الحساب غير موجود", status=404)
+    return json_ok({
+        "user_id": admin["user_id"],
+        "role": admin["role"],
+        "display_name": display_name,
+    })
+
 async def api_auth_verify(request):
     try:
         body = await request.json()
@@ -2668,6 +2694,7 @@ async def api_error_middleware(request, handler):
 def register_api_routes(api: web.Application):
     api.router.add_post("/api/auth/verify", api_auth_verify)
     api.router.add_get("/api/auth/session", api_auth_session)
+    api.router.add_post("/api/auth/profile", api_auth_profile_update)
     api.router.add_get("/api/dashboard", api_dashboard)
     api.router.add_get("/api/problems", api_problems_list)
     api.router.add_get("/api/problems/{id}/media/{media_id}", api_problem_media_file)
