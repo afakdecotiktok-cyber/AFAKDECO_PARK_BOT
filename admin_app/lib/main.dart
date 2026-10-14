@@ -104,6 +104,19 @@ class AfakdecoApp extends StatelessWidget {
           labelStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
         ),
         dividerTheme: const DividerThemeData(color: Color(0xFFE9EDF4), thickness: 1),
+        bottomSheetTheme: const BottomSheetThemeData(
+          backgroundColor: Colors.white,
+          surfaceTintColor: Colors.transparent,
+          showDragHandle: true,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+          ),
+        ),
+        dialogTheme: DialogThemeData(
+          backgroundColor: Colors.white,
+          surfaceTintColor: Colors.transparent,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+        ),
         navigationBarTheme: NavigationBarThemeData(
           backgroundColor: Colors.white,
           indicatorColor: const Color(0xFFE8EEFF),
