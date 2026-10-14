@@ -212,11 +212,26 @@ class _VehicleHistoryScreenState extends State<VehicleHistoryScreen> {
                     const Text('الوسائط', style: TextStyle(fontWeight: FontWeight.bold)),
                     ...media.map((raw) {
                       final m = Map<String, dynamic>.from(raw);
+                      final mediaId = int.tryParse(m['id']?.toString() ?? '');
                       final url = (m['telegram_url'] ?? '').toString();
                       return ListTile(
                         contentPadding: EdgeInsets.zero,
-                        leading: Icon(m['media_type'] == 'فيديو' ? Icons.videocam : Icons.photo),
-                        title: Text('فتح الوسائط الأصلية في Telegram'),
+                        leading: m['available_in_app'] == true && mediaId != null && m['media_type'] == 'صورة'
+                            ? FutureBuilder<Map<String, String>>(
+                                future: Api.instance.mediaHeaders(),
+                                builder: (context, snapshot) => snapshot.hasData
+                                    ? Image.network(
+                                        Api.instance.mediaUrl(id, mediaId),
+                                        headers: snapshot.data,
+                                        width: 56,
+                                        height: 56,
+                                        fit: BoxFit.cover,
+                                        errorBuilder: (_, __, ___) => const Icon(Icons.broken_image_outlined),
+                                      )
+                                    : const SizedBox(width: 56, height: 56, child: Center(child: CircularProgressIndicator(strokeWidth: 2))),
+                              )
+                            : Icon(m['media_type'] == 'فيديو' ? Icons.videocam : Icons.photo),
+                        title: Text('الوسائط • ${m['media_type'] ?? 'Telegram'}'),
                         subtitle: Text((m['media_type'] ?? 'وسائط').toString()),
                         trailing: IconButton(
                           icon: const Icon(Icons.open_in_new),
