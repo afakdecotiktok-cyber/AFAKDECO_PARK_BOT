@@ -26,6 +26,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Check backend Python syntax
+        run: python3 -m py_compile ../bot_with_web.py ../accident_flow.py
+
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
