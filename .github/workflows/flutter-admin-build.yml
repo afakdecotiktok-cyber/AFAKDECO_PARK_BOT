@@ -7,6 +7,11 @@ on:
     paths:
       - "admin_app/**"
       - ".github/workflows/flutter-admin-build.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "admin_app/**"
+      - ".github/workflows/flutter-admin-build.yml"
 
 permissions:
   contents: read
