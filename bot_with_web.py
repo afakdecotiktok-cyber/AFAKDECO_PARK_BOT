@@ -2366,6 +2366,8 @@ async def api_problem_media_file(request):
     media = await run_db(get_problem_media_file, problem_id, media_id)
     if not media or not media.get("telegram_file_id"):
         return json_err("الوسائط غير متاحة داخل التطبيق؛ افتح الرسالة الأصلية في Telegram", status=404)
+    if media.get("media_type") != "صورة":
+        return json_err("المعاينة داخل التطبيق متاحة للصور فقط؛ افتح الفيديو أو الصوت في Telegram", status=415)
     expires_at = str(media.get("expires_at") or "")
     if not expires_at or expires_at < datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S"):
         return json_err("انتهت مدة الاحتفاظ بالوسائط داخل التطبيق؛ افتحها من Telegram", status=410)
