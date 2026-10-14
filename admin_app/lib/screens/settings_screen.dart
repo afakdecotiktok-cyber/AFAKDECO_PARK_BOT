@@ -10,6 +10,22 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   bool busy = false;
+  Map<String, dynamic>? profile;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadProfile();
+  }
+
+  Future<void> _loadProfile() async {
+    try {
+      final value = await Api.instance.profile();
+      if (mounted) setState(() => profile = value);
+    } catch (_) {
+      if (mounted) setState(() => profile = null);
+    }
+  }
 
   Future<void> _run(Future<void> Function() action, String success) async {
     setState(() => busy = true);
@@ -55,6 +71,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const SizedBox(height: 4),
           const Text('تُنفّذ العمليات الإدارية عبر واجهة الخادم الحالية وتخضع لصلاحيات الحساب.', style: TextStyle(color: Colors.grey)),
           const SizedBox(height: 12),
+          Card(
+            child: ListTile(
+              leading: const CircleAvatar(child: Icon(Icons.person_outline)),
+              title: Text((profile?['display_name'] ?? '').toString().trim().isEmpty
+                  ? 'الملف الشخصي'
+                  : profile!['display_name'].toString()),
+              subtitle: Text(profile == null
+                  ? 'جارٍ تحميل بيانات الحساب...'
+                  : 'Telegram ID: \${profile!['user_id'] ?? '—'} • الصلاحية: \${profile!['role'] ?? '—'}'),
+              trailing: IconButton(
+                tooltip: 'تحديث بيانات الحساب',
+                onPressed: _loadProfile,
+                icon: const Icon(Icons.refresh),
+              ),
+            ),
+          ),
           Card(
             child: Column(
               children: [
@@ -140,8 +172,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
             child: Column(
               children: [
                 const ListTile(leading: Icon(Icons.build_circle_outlined), title: Text('صيانة البيانات'), subtitle: Text('تحديث القيم يتم عبر صفحات السجلات المخصصة.')),
-                const ListTile(leading: Icon(Icons.speed), title: Text('Vidange والكيلومترات'), subtitle: Text('افتح سجل المركبة لتعديل قيمة Vidange ومراجعة جميع القراءات.')),
-                const ListTile(leading: Icon(Icons.archive_outlined), title: Text('الأرشفة'), subtitle: Text('بعد 30 يوماً تُفتح الوسائط القديمة من رسالة Telegram الأصلية.')),
+                const ListTile(leading: Icon(Icons.speed), title: Text('Vidange والكيلومترات'), subtitle: Text('عرض القيم المسجلة وتعديل قيمة Vidange للمركبة.')),
+                ListTile(
+                  leading: const Icon(Icons.list_alt),
+                  title: const Text('عرض حالة Vidange لكل المركبات'),
+                  trailing: const Icon(Icons.chevron_left),
+                  onTap: busy ? null : _showVidange,
+                ),
+                ListTile(
+                  leading: const Icon(Icons.cached),
+                  title: const Text('مسح التخزين المؤقت'),
+                  subtitle: const Text('حذف النسخ المحلية المؤقتة وإعادة تحميل البيانات عند الطلب.'),
+                  trailing: const Icon(Icons.chevron_left),
+                  onTap: busy ? null : () => _run(Api.instance.clearApiCache, 'تم مسح التخزين المؤقت'),
+                ),
+                const ListTile(leading: Icon(Icons.archive_outlined), title: Text('الأرشفة'), subtitle: Text('تُعرض مراجع الوسائط القديمة لفتحها من رسالة Telegram الأصلية.')),
               ],
             ),
           ),
@@ -155,6 +200,77 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ],
       ),
     );
+  }
+
+  Future<void> _showVidange() async {
+    setState(() => busy = true);
+    try {
+      final rows = await Api.instance.vidange();
+      if (!mounted) return;
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        showDragHandle: true,
+        builder: (sheetContext) => Directionality(
+          textDirection: TextDirection.rtl,
+          child: SafeArea(
+            child: ListView(
+              shrinkWrap: true,
+              padding: const EdgeInsets.all(16),
+              children: [
+                const Text('حالة Vidange للمركبات', style: TextStyle(fontSize: 19, fontWeight: FontWeight.w800)),
+                const SizedBox(height: 10),
+                if (rows.isEmpty) const Text('لا توجد بيانات.'),
+                ...rows.map((raw) {
+                  final v = Map<String, dynamic>.from(raw);
+                  final remaining = v['remaining_km'];
+                  return ListTile(
+                    leading: const Icon(Icons.directions_car_outlined),
+                    title: Text((v['vehicle'] ?? '—').toString()),
+                    subtitle: Text('آخر Vidange: \${v['last_vidange_km'] ?? 'غير مسجل'} KM • آخر قراءة: \${v['latest_km'] ?? 'غير متوفرة'} KM\nالمتبقي: \${remaining ?? 'غير متوفر'} KM'),
+                    isThreeLine: true,
+                    trailing: IconButton(
+                      tooltip: 'تعديل القيمة',
+                      icon: const Icon(Icons.edit),
+                      onPressed: () async {
+                        final controller = TextEditingController(text: v['last_vidange_km']?.toString() ?? '');
+                        final value = await showDialog<String>(
+                          context: sheetContext,
+                          builder: (dialogContext) => AlertDialog(
+                            title: Text('تعديل Vidange • \${v['vehicle']}'),
+                            content: TextField(
+                              controller: controller,
+                              keyboardType: TextInputType.number,
+                              decoration: const InputDecoration(labelText: 'قيمة آخر Vidange (KM)', border: OutlineInputBorder()),
+                            ),
+                            actions: [
+                              TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('إلغاء')),
+                              FilledButton(onPressed: () => Navigator.pop(dialogContext, controller.text.trim()), child: const Text('حفظ')),
+                            ],
+                          ),
+                        );
+                        controller.dispose();
+                        final km = int.tryParse(value ?? '');
+                        if (km == null || km < 0) {
+                          if (mounted && value != null) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('أدخل قيمة كيلومترات صحيحة')));
+                          return;
+                        }
+                        await _run(() async { await Api.instance.setVidange(v['vehicle'].toString(), km); }, 'تم حفظ قيمة Vidange');
+                        if (sheetContext.mounted) Navigator.pop(sheetContext);
+                      },
+                    ),
+                  );
+                }),
+              ],
+            ),
+          ),
+        ),
+      );
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر جلب بيانات Vidange: $e')));
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
   }
 
   Future<void> _showAdmins() async {
