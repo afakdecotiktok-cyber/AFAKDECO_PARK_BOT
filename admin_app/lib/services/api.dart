@@ -5,6 +5,15 @@ import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+class ApiRequestException implements Exception {
+  final int statusCode;
+  final String message;
+  const ApiRequestException(this.statusCode, this.message);
+
+  @override
+  String toString() => message;
+}
+
 class Api {
   Api._();
   static final instance = Api._();
@@ -62,6 +71,7 @@ class Api {
     await prefs.remove('role');
     await prefs.remove('display_name');
     await prefs.remove('user_id');
+    await clearApiCache();
   }
 
   Future<void> logout() async {
@@ -73,6 +83,7 @@ class Api {
     await prefs.remove('role');
     await prefs.remove('display_name');
     await prefs.remove('user_id');
+    await clearApiCache();
   }
 
   // Cache GET responses for offline/read-only fallback. Fresh network data always wins.
@@ -86,9 +97,9 @@ class Api {
         'value': fresh,
       }));
       return fresh;
-    } catch (_) {
-      // Never use cached data after the server explicitly invalidates the session.
-      if (await _token() == null) rethrow;
+    } catch (e) {
+      // Never use stale data for authorization or server-side validation failures.
+      if (e is ApiRequestException || await _token() == null) rethrow;
       final raw = prefs.getString(key);
       if (raw == null) rethrow;
       try {
@@ -176,7 +187,8 @@ class Api {
       throw Exception('انتهت جلسة الدخول، سجّل الدخول مجدداً');
     }
     if (response.statusCode >= 400 || (data is Map && data['ok'] == false)) {
-      throw Exception(data is Map ? (data['error'] ?? 'حدث خطأ') : 'حدث خطأ');
+      final message = data is Map ? (data['error'] ?? 'حدث خطأ').toString() : 'حدث خطأ';
+      throw ApiRequestException(response.statusCode, message);
     }
     if (method != 'GET') await clearApiCache();
     return data;
