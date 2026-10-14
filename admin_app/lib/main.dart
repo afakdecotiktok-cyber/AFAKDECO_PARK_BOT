@@ -98,7 +98,7 @@ class AfakdecoApp extends StatelessWidget {
             textStyle: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
           ),
         ),
-        chipTheme: scheme.chipTheme.copyWith(
+        chipTheme: ChipThemeData(
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(13)),
           side: const BorderSide(color: Color(0xFFE4E8F1)),
           labelStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
