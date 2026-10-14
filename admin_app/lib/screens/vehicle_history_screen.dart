@@ -173,7 +173,7 @@ class _VehicleHistoryScreenState extends State<VehicleHistoryScreen> {
             color: accident ? const Color(0xFF7B3FF2) : null,
           ),
           title: Text((item['problem_text'] ?? 'سجل بدون وصف').toString(), maxLines: 2, overflow: TextOverflow.ellipsis),
-          subtitle: Text('${item['date'] ?? ''} • ${item['status'] ?? ''}'),
+          subtitle: Text('${item['date'] ?? ''} • ${item['ruglee'] == 'تم الإصلاح' ? 'تم الإصلاح' : item['status'] ?? ''}'),
           isThreeLine: false,
           onTap: () => _showProblemActions(item),
         );
@@ -206,7 +206,7 @@ class _VehicleHistoryScreenState extends State<VehicleHistoryScreen> {
                   const SizedBox(height: 8),
                   Text((item['problem_text'] ?? 'لا يوجد وصف').toString()),
                   const SizedBox(height: 6),
-                  Text('الحالة: ${item['status'] ?? '—'}'),
+                  Text('الحالة: ${item['ruglee'] == 'تم الإصلاح' ? 'تم الإصلاح' : item['status'] ?? '—'}'),
                   if (media.isNotEmpty) ...[
                     const SizedBox(height: 10),
                     const Text('الوسائط', style: TextStyle(fontWeight: FontWeight.bold)),
@@ -286,19 +286,72 @@ class _VehicleHistoryScreenState extends State<VehicleHistoryScreen> {
                       icon: const Icon(Icons.warning_amber_rounded, color: Color(0xFF7B3FF2)),
                       label: const Text('تحويل إلى حادث'),
                     ),
+                  if (item['ruglee'] != 'تم الإصلاح')
+                    OutlinedButton.icon(
+                      onPressed: () async {
+                        final nextStatus = item['status'] == 'قيد التصليح' ? 'قيد الانتظار' : 'قيد التصليح';
+                        try {
+                          await Api.instance.setProblemStatus(id, nextStatus);
+                          if (sheetContext.mounted) Navigator.pop(sheetContext);
+                          await load();
+                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text(nextStatus == 'قيد التصليح' ? 'تم نقل الشكوى إلى قيد المعالجة' : 'تمت إعادة الشكوى إلى قيد الانتظار')),
+                          );
+                        } catch (e) {
+                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر تحديث الحالة: $e')));
+                        }
+                      },
+                      icon: Icon(item['status'] == 'قيد التصليح' ? Icons.undo : Icons.build_outlined),
+                      label: Text(item['status'] == 'قيد التصليح' ? 'إعادة إلى En attente' : 'En cours de traitement'),
+                    ),
+                  if (item['ruglee'] != 'تم الإصلاح' && item['status'] == 'قيد التصليح')
+                    OutlinedButton.icon(
+                      onPressed: () async {
+                        try {
+                          await Api.instance.fixProblem(id);
+                          if (sheetContext.mounted) Navigator.pop(sheetContext);
+                          await load();
+                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم تسجيل الإصلاح')));
+                        } catch (e) {
+                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر تسجيل الإصلاح: $e')));
+                        }
+                      },
+                      icon: const Icon(Icons.check_circle_outline),
+                      label: const Text('Mark as fixed / تم الإصلاح'),
+                    ),
+                  if (item['ruglee'] == 'تم الإصلاح')
+                    const ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(Icons.check_circle, color: Colors.green),
+                      title: Text('تم الإصلاح'),
+                    ),
                   OutlinedButton.icon(
-                    onPressed: () async {
-                      try {
-                        await Api.instance.fixProblem(id);
-                        if (sheetContext.mounted) Navigator.pop(sheetContext);
-                        await load();
-                      } catch (e) {
-                        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر تسجيل الإصلاح: $e')));
-                      }
-                    },
-                    icon: const Icon(Icons.check_circle_outline),
-                    label: const Text('تسجيل الإصلاح'),
-                  ),
+                      style: OutlinedButton.styleFrom(foregroundColor: const Color(0xFFDC4545)),
+                      onPressed: () async {
+                        final confirmed = await showDialog<bool>(
+                          context: sheetContext,
+                          builder: (dialogContext) => AlertDialog(
+                            title: const Text('حذف الشكوى؟'),
+                            content: const Text('سيتم حذف هذا السجل من قاعدة البيانات.'),
+                            actions: [
+                              TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('إلغاء')),
+                              FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('حذف')),
+                            ],
+                          ),
+                        );
+                        if (confirmed != true) return;
+                        try {
+                          await Api.instance.deleteProblem(id);
+                          if (sheetContext.mounted) Navigator.pop(sheetContext);
+                          await load();
+                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم حذف الشكوى')));
+                        } catch (e) {
+                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر حذف الشكوى: $e')));
+                        }
+                      },
+                      icon: const Icon(Icons.delete_outline),
+                      label: const Text('Delete / حذف'),
+                    ),
                 ],
               ),
             ),
