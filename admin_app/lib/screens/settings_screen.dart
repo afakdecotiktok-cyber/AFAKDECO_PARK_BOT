@@ -79,7 +79,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   : profile!['display_name'].toString()),
               subtitle: Text(profile == null
                   ? 'جارٍ تحميل بيانات الحساب...'
-                  : 'Telegram ID: \${profile!['user_id'] ?? '—'} • الصلاحية: \${profile!['role'] ?? '—'}'),
+                  : 'Telegram ID: ${profile!['user_id'] ?? '—'} • الصلاحية: ${profile!['role'] ?? '—'}'),
               trailing: IconButton(
                 tooltip: 'تحديث بيانات الحساب',
                 onPressed: _loadProfile,
@@ -227,7 +227,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   return ListTile(
                     leading: const Icon(Icons.directions_car_outlined),
                     title: Text((v['vehicle'] ?? '—').toString()),
-                    subtitle: Text('آخر Vidange: \${v['last_vidange_km'] ?? 'غير مسجل'} KM • آخر قراءة: \${v['latest_km'] ?? 'غير متوفرة'} KM\nالمتبقي: \${remaining ?? 'غير متوفر'} KM'),
+                    subtitle: Text('آخر Vidange: ${v['last_vidange_km'] ?? 'غير مسجل'} KM • آخر قراءة: ${v['latest_km'] ?? 'غير متوفرة'} KM\nالمتبقي: ${remaining ?? 'غير متوفر'} KM'),
                     isThreeLine: true,
                     trailing: IconButton(
                       tooltip: 'تعديل القيمة',
@@ -237,7 +237,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         final value = await showDialog<String>(
                           context: sheetContext,
                           builder: (dialogContext) => AlertDialog(
-                            title: Text('تعديل Vidange • \${v['vehicle']}'),
+                            title: Text('تعديل Vidange • ${v['vehicle']}'),
                             content: TextField(
                               controller: controller,
                               keyboardType: TextInputType.number,
