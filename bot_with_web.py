@@ -396,6 +396,9 @@ def set_problem_comment(problem_id: int, comment: str):
         cur = conn.cursor()
         cur.execute("UPDATE problems SET comments=%s WHERE id=%s", (comment, problem_id))
         conn.commit()
+    problem = get_problem(problem_id)
+    if problem:
+        invalidate_cache(problem["vehicle"])
 
 def delete_problem(problem_id: int):
     problem = get_problem(problem_id)
@@ -2425,13 +2428,26 @@ async def api_problem_fix(request):
     problem = await run_db(get_problem, problem_id)
     if not problem:
         return json_err("المشكلة غير موجودة", status=404)
-    if problem["media_type"] and problem["media_type"] != "نظام" and not problem["comments"]:
+    if problem["ruglee"] != "تم الإصلاح" and problem["media_type"] and problem["media_type"] != "نظام" and not problem["comments"]:
         return json_err("يجب إضافة تعليق أولاً قبل تأكيد الإصلاح", status=409)
-    new_ruglee = "تم الإصلاح" if problem["ruglee"] == "غير مُصلح" else "غير مُصلح"
-    await run_db(update_problem_status, problem_id, None, new_ruglee)
+
+    # This endpoint means "mark fixed", not a toggle. Repeated taps must not reopen a fixed problem.
+    was_fixed = problem["ruglee"] == "تم الإصلاح"
+    new_ruglee = "تم الإصلاح"
+    if not was_fixed:
+        await run_db(update_problem_status, problem_id, ruglee=new_ruglee)
     updated_problem = await run_db(get_problem, problem_id)
     await _update_problem_message(updated_problem)
-    if updated_problem["media_type"] == "نظام" and new_ruglee == "تم الإصلاح":
+    if updated_problem.get("group_message_id"):
+        try:
+            await app.bot.edit_message_reply_markup(
+                chat_id=ADMIN_GROUP_ID,
+                message_id=updated_problem["group_message_id"],
+                reply_markup=await run_db(build_problem_keyboard, problem_id),
+            )
+        except Exception as e:
+            logging.debug(f"Non-critical keyboard update failure after app fix: {e}")
+    if not was_fixed and updated_problem["media_type"] == "نظام":
         req_id = updated_problem.get("validation_requester") or updated_problem.get("user_id")
         if req_id:
             try:
@@ -2440,6 +2456,34 @@ async def api_problem_fix(request):
             except Exception as e:
                 logging.debug(f"Non-critical send failure: {e}")
     return json_ok({"problem_id": problem_id, "ruglee": new_ruglee}, by=admin["user_id"])
+
+
+async def api_problem_set_status(request):
+    admin = await require_auth(request)
+    problem_id = int(request.match_info["id"])
+    try:
+        body = await request.json()
+    except Exception:
+        return json_err("invalid JSON body")
+    new_status = str(body.get("status") or "").strip()
+    if new_status not in ("قيد الانتظار", "قيد التصليح"):
+        return json_err("الحالة يجب أن تكون قيد الانتظار أو قيد التصليح")
+    problem = await run_db(get_problem, problem_id)
+    if not problem:
+        return json_err("المشكلة غير موجودة", status=404)
+    await run_db(update_problem_status, problem_id, status=new_status)
+    updated_problem = await run_db(get_problem, problem_id)
+    await _update_problem_message(updated_problem)
+    if updated_problem.get("group_message_id"):
+        try:
+            await app.bot.edit_message_reply_markup(
+                chat_id=ADMIN_GROUP_ID,
+                message_id=updated_problem["group_message_id"],
+                reply_markup=await run_db(build_problem_keyboard, problem_id),
+            )
+        except Exception as e:
+            logging.debug(f"Non-critical keyboard update failure after app status change: {e}")
+    return json_ok({"problem_id": problem_id, "status": new_status}, by=admin["user_id"])
 
 async def api_problem_comment(request):
     await require_auth(request)
@@ -2456,6 +2500,17 @@ async def api_problem_comment(request):
     if not problem:
         return json_err("المشكلة غير موجودة", status=404)
     await run_db(set_problem_comment, problem_id, text)
+    updated_problem = await run_db(get_problem, problem_id)
+    await _update_problem_message(updated_problem)
+    if updated_problem and updated_problem.get("group_message_id"):
+        try:
+            await app.bot.edit_message_reply_markup(
+                chat_id=ADMIN_GROUP_ID,
+                message_id=updated_problem["group_message_id"],
+                reply_markup=await run_db(build_problem_keyboard, problem_id),
+            )
+        except Exception as e:
+            logging.debug(f"Non-critical keyboard update failure after app comment: {e}")
     return json_ok({"problem_id": problem_id})
 
 async def api_problem_delete(request):
@@ -2702,6 +2757,7 @@ def register_api_routes(api: web.Application):
     api.router.add_get("/api/problems/{id}/media/{media_id}", api_problem_media_file)
     api.router.add_post("/api/problems/{id}/accident", api_problem_convert_accident)
     api.router.add_post("/api/problems/{id}/fix", api_problem_fix)
+    api.router.add_post("/api/problems/{id}/status", api_problem_set_status)
     api.router.add_post("/api/problems/{id}/comment", api_problem_comment)
     api.router.add_delete("/api/problems/{id}", api_problem_delete)
     api.router.add_get("/api/drivers/{user_id}", api_driver_history)
