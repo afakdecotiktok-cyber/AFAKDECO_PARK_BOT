@@ -1,6 +1,8 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class Api {
@@ -108,6 +110,26 @@ class Api {
     for (final key in prefs.getKeys().where((k) => k.startsWith('api_cache:')).toList()) {
       await prefs.remove(key);
     }
+  }
+
+  Future<String> downloadExport(String path, String filename) async {
+    final response = await http.get(Uri.parse(baseUrl + path), headers: await _headers());
+    if (response.statusCode == 401) {
+      await logout();
+      throw Exception('انتهت جلسة الدخول، سجّل الدخول مجدداً');
+    }
+    if (response.statusCode >= 400) {
+      String message = 'تعذر تنزيل ملف Excel';
+      try {
+        final data = jsonDecode(response.body);
+        if (data is Map && data['error'] != null) message = data['error'].toString();
+      } catch (_) {}
+      throw Exception(message);
+    }
+    final dir = await getTemporaryDirectory();
+    final file = File('${dir.path}/$filename');
+    await file.writeAsBytes(response.bodyBytes, flush: true);
+    return file.path;
   }
 
   Future<Map<String, String>> mediaHeaders() => _headers();
@@ -222,6 +244,15 @@ class Api {
 
   Future<void> removeVehicle(String code) async =>
       request('DELETE', '/api/vehicles/${Uri.encodeComponent(code)}');
+
+  Future<Map<String, dynamic>> fixLatestKm(String vehicle, int km) async {
+    final response = await request(
+      'POST',
+      '/api/vehicles/${Uri.encodeComponent(vehicle)}/fix-km',
+      body: {'km': km},
+    );
+    return Map<String, dynamic>.from(response['data'] ?? {});
+  }
 
   Future<List<dynamic>> admins() async =>
       List<dynamic>.from((await request('GET', '/api/admins'))['data'] ?? []);
