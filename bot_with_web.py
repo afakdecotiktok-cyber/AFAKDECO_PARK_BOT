@@ -2292,6 +2292,25 @@ def _get_problem_media(problem_id: int):
         cur.execute("SELECT id, media_type, telegram_message_id, telegram_chat_id, created_at, expires_at, archived_at FROM problem_media WHERE problem_id=%s ORDER BY id", (problem_id,))
         return [dict(x) for x in cur.fetchall()]
 
+def _problem_media_for_api(problem: dict, media_rows: list) -> list:
+    rows = [dict(m) for m in media_rows]
+    # Older reports predate the media index; keep their original Telegram message reachable.
+    if not rows and problem.get("media_type") and problem.get("media_type") != "نظام" and problem.get("group_message_id"):
+        rows.append({
+            "id": None,
+            "media_type": problem.get("media_type"),
+            "telegram_message_id": problem.get("group_message_id"),
+            "telegram_chat_id": problem.get("telegram_chat_id") or ADMIN_GROUP_ID,
+            "created_at": problem.get("date"),
+            "expires_at": None,
+            "archived_at": None,
+        })
+    for media in rows:
+        expiry = str(media.get("expires_at") or "")
+        media["available_in_app"] = bool(expiry) and expiry >= datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S") and bool(media.get("id"))
+        media["telegram_url"] = telegram_message_url(media.get("telegram_chat_id"), media.get("telegram_message_id"))
+    return rows
+
 async def api_dashboard(request):
     await require_auth(request)
     vehicles = await run_db(get_all_vehicles)
@@ -2318,10 +2337,8 @@ async def api_problems_list(request):
         if search:
             hay = " ".join(str(p.get(k) or "") for k in ("vehicle","driver_name","problem_text","comments","problem_type")).lower()
             if search not in hay: continue
-        p["media"] = await run_db(_get_problem_media, p["id"])
-        for m in p["media"]:
-            m["available_in_app"] = str(m.get("expires_at") or "") >= datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
-            m["telegram_url"] = telegram_message_url(m.get("telegram_chat_id"), m.get("telegram_message_id"))
+        media_rows = await run_db(_get_problem_media, p["id"])
+        p["media"] = _problem_media_for_api(p, media_rows)
         result.append(p)
     return json_ok(result)
 
@@ -2451,10 +2468,8 @@ async def api_vehicle_history(request):
     vehicle = request.match_info["vehicle"].upper()
     history = await run_db(get_vehicle_history, vehicle)
     for p in history.get("problems", []):
-        p["media"] = await run_db(_get_problem_media, p["id"])
-        for m in p["media"]:
-            m["available_in_app"] = str(m.get("expires_at") or "") >= datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
-            m["telegram_url"] = telegram_message_url(m.get("telegram_chat_id"), m.get("telegram_message_id"))
+        media_rows = await run_db(_get_problem_media, p["id"])
+        p["media"] = _problem_media_for_api(p, media_rows)
     last_vid = await run_db(get_last_vidange_km, vehicle)
     latest = await run_db(get_latest_km, vehicle)
     history["vidange"] = {
