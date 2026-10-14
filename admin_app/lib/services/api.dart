@@ -251,6 +251,13 @@ class Api {
   Future<Map<String, dynamic>> profile() async =>
       Map<String, dynamic>.from((await request('GET', '/api/auth/session'))['data'] ?? {});
 
+  Future<Map<String, dynamic>> updateProfile(String displayName) async =>
+      Map<String, dynamic>.from((await request(
+        'POST',
+        '/api/auth/profile',
+        body: {'display_name': displayName.trim()},
+      ))['data'] ?? {});
+
   Future<void> addVehicle(String code) async =>
       request('POST', '/api/vehicles', body: {'code': code});
 
