@@ -82,10 +82,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
               subtitle: Text(profile == null
                   ? 'جارٍ تحميل بيانات الحساب...'
                   : 'Telegram ID: ${profile!['user_id'] ?? '—'} • الصلاحية: ${profile!['role'] ?? '—'}'),
-              trailing: IconButton(
-                tooltip: 'تحديث بيانات الحساب',
-                onPressed: _loadProfile,
-                icon: const Icon(Icons.refresh),
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    tooltip: 'تعديل الاسم الظاهر',
+                    onPressed: busy ? null : _editProfile,
+                    icon: const Icon(Icons.edit_outlined),
+                  ),
+                  IconButton(
+                    tooltip: 'تحديث بيانات الحساب',
+                    onPressed: _loadProfile,
+                    icon: const Icon(Icons.refresh),
+                  ),
+                ],
               ),
             ),
           ),
@@ -238,6 +248,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ],
       ),
     );
+  }
+
+  Future<void> _editProfile() async {
+    final current = (profile?['display_name'] ?? '').toString();
+    final displayName = await _ask('تعديل الملف الشخصي', 'الاسم الظاهر داخل التطبيق');
+    if (displayName == null || displayName.trim().isEmpty || !mounted) return;
+    if (displayName.trim().length < 2 || displayName.trim().length > 60) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('الاسم يجب أن يكون بين حرفين و60 حرفاً')));
+      return;
+    }
+    // Avoid writing a new name if the dialog was cancelled or unchanged.
+    if (displayName.trim() == current.trim()) return;
+    await _run(() async {
+      final updated = await Api.instance.updateProfile(displayName);
+      if (mounted) setState(() => profile = updated);
+    }, 'تم تحديث بيانات الملف الشخصي');
   }
 
   Future<void> _shareExport(String path, String filename, String success) async {
