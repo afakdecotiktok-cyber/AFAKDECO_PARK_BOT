@@ -331,9 +331,8 @@ class _ProblemsScreenState extends State<ProblemsScreen> {
                       leading: Icon(Icons.check_circle, color: Colors.green),
                       title: Text('تم الإصلاح'),
                     ),
-                  if (p['ruglee'] != 'تم الإصلاح')
-                    OutlinedButton.icon(
-                      style: OutlinedButton.styleFrom(foregroundColor: Colors.red),
+                  OutlinedButton.icon(
+                      style: OutlinedButton.styleFrom(foregroundColor: const Color(0xFFDC4545)),
                       onPressed: () async {
                         final confirmed = await showDialog<bool>(
                           context: sheetContext,
