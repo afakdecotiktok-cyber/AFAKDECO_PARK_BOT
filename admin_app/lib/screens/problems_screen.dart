@@ -221,11 +221,26 @@ class _ProblemsScreenState extends State<ProblemsScreen> {
                     ...media.map((raw) {
                       final m = Map<String, dynamic>.from(raw);
                       final available = m['available_in_app'] == true;
+                      final mediaId = int.tryParse(m['id']?.toString() ?? '');
                       final url = (m['telegram_url'] ?? '').toString();
                       return ListTile(
                         contentPadding: EdgeInsets.zero,
-                        leading: Icon(m['media_type'] == 'فيديو' ? Icons.videocam : Icons.photo, color: available ? null : Colors.grey),
-                        title: Text(available ? 'وسائط محفوظة في Telegram' : 'مؤرشفة في Telegram'),
+                        leading: available && mediaId != null && m['media_type'] == 'صورة'
+                            ? FutureBuilder<Map<String, String>>(
+                                future: Api.instance.mediaHeaders(),
+                                builder: (context, snapshot) => snapshot.hasData
+                                    ? Image.network(
+                                        Api.instance.mediaUrl(id, mediaId),
+                                        headers: snapshot.data,
+                                        width: 56,
+                                        height: 56,
+                                        fit: BoxFit.cover,
+                                        errorBuilder: (_, __, ___) => const Icon(Icons.broken_image_outlined),
+                                      )
+                                    : const SizedBox(width: 56, height: 56, child: Center(child: CircularProgressIndicator(strokeWidth: 2))),
+                              )
+                            : Icon(m['media_type'] == 'فيديو' ? Icons.videocam : Icons.photo, color: available ? null : Colors.grey),
+                        title: Text(available ? 'وسائط محفوظة في التطبيق / Telegram' : 'مؤرشفة في Telegram'),
                         subtitle: Text(available ? 'المصدر الأصلي محفوظ في Telegram' : 'انتهت مدة العرض داخل التطبيق (30 يوماً)'),
                         trailing: url.isNotEmpty ? IconButton(
                           tooltip: 'فتح في Telegram',

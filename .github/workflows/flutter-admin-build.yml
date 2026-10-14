@@ -7,6 +7,11 @@ on:
     paths:
       - "admin_app/**"
       - ".github/workflows/flutter-admin-build.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "admin_app/**"
+      - ".github/workflows/flutter-admin-build.yml"
 
 permissions:
   contents: read
@@ -20,6 +25,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Check backend Python syntax
+        run: python3 -m py_compile ../bot_with_web.py ../accident_flow.py
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2

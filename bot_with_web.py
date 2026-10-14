@@ -362,6 +362,19 @@ def add_problem(user_id: int, driver_name: str, vehicle: str, problem_text: str,
     invalidate_cache(vehicle)
     return problem_id
 
+def save_problem_media(problem_id: int, media_type: str, telegram_file_id: str, telegram_message_id: int, telegram_chat_id: int = ADMIN_GROUP_ID):
+    """Keep Telegram as the durable media source and index the original admin-topic message."""
+    now = datetime.now(TZ)
+    created_at = now.strftime("%Y-%m-%d %H:%M:%S")
+    expires_at = (now + timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+    with db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO problem_media (problem_id, media_type, telegram_file_id, telegram_message_id, telegram_chat_id, created_at, expires_at) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+            (problem_id, media_type, telegram_file_id, telegram_message_id, telegram_chat_id, created_at, expires_at)
+        )
+        conn.commit()
+
 def update_problem_status(problem_id: int, status=None, ruglee=None, validation_requester=None, group_message_id=None):
     with db_connection() as conn:
         cur = conn.cursor()
@@ -1192,6 +1205,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = await context.bot.send_photo(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_RECLAMATIONS, photo=file_id,
                                            caption=header, reply_markup=build_problem_keyboard(0))
         problem_id = await run_db(add_problem, user_id, driver["name"], driver["vehicle"], caption, media_type, group_msg_id=msg.message_id)
+        await run_db(save_problem_media, problem_id, media_type, file_id, msg.message_id, ADMIN_GROUP_ID)
         await msg.edit_reply_markup(reply_markup=await run_db(build_problem_keyboard, problem_id))
     elif update.message.video:
         file_id = update.message.video.file_id
@@ -1199,6 +1213,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = await context.bot.send_video(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_RECLAMATIONS, video=file_id,
                                            caption=header, reply_markup=build_problem_keyboard(0))
         problem_id = await run_db(add_problem, user_id, driver["name"], driver["vehicle"], caption, media_type, group_msg_id=msg.message_id)
+        await run_db(save_problem_media, problem_id, media_type, file_id, msg.message_id, ADMIN_GROUP_ID)
         await msg.edit_reply_markup(reply_markup=await run_db(build_problem_keyboard, problem_id))
     elif update.message.voice:
         file_id = update.message.voice.file_id
@@ -1206,6 +1221,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = await context.bot.send_voice(chat_id=ADMIN_GROUP_ID, message_thread_id=TOPIC_RECLAMATIONS, voice=file_id,
                                            caption=header, reply_markup=build_problem_keyboard(0))
         problem_id = await run_db(add_problem, user_id, driver["name"], driver["vehicle"], caption, media_type, group_msg_id=msg.message_id)
+        await run_db(save_problem_media, problem_id, media_type, file_id, msg.message_id, ADMIN_GROUP_ID)
         await msg.edit_reply_markup(reply_markup=await run_db(build_problem_keyboard, problem_id))
     await update.message.reply_text("تم إرسال الشكوى.", reply_markup=MAIN_KEYBOARD)
 
@@ -2235,6 +2251,32 @@ async def api_auth_session(request):
         "display_name": admin.get("display_name") or "",
     })
 
+def update_admin_display_name(user_id: int, display_name: str):
+    with db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE admins SET display_name=%s WHERE user_id=%s", (display_name, user_id))
+        changed = cur.rowcount
+        conn.commit()
+    return changed > 0
+
+async def api_auth_profile_update(request):
+    admin = await require_auth(request)
+    try:
+        body = await request.json()
+    except Exception:
+        return json_err("invalid JSON body")
+    display_name = str(body.get("display_name") or "").strip()
+    if len(display_name) < 2 or len(display_name) > 60:
+        return json_err("الاسم يجب أن يكون بين حرفين و60 حرفاً")
+    updated = await run_db(update_admin_display_name, int(admin["user_id"]), display_name)
+    if not updated:
+        return json_err("الحساب غير موجود", status=404)
+    return json_ok({
+        "user_id": admin["user_id"],
+        "role": admin["role"],
+        "display_name": display_name,
+    })
+
 async def api_auth_verify(request):
     try:
         body = await request.json()
@@ -2276,6 +2318,35 @@ def _get_problem_media(problem_id: int):
         cur.execute("SELECT id, media_type, telegram_message_id, telegram_chat_id, created_at, expires_at, archived_at FROM problem_media WHERE problem_id=%s ORDER BY id", (problem_id,))
         return [dict(x) for x in cur.fetchall()]
 
+def get_problem_media_file(problem_id: int, media_id: int):
+    with db_connection() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            "SELECT id, telegram_file_id, media_type, expires_at FROM problem_media WHERE problem_id=%s AND id=%s",
+            (problem_id, media_id),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+def _problem_media_for_api(problem: dict, media_rows: list) -> list:
+    rows = [dict(m) for m in media_rows]
+    # Older reports predate the media index; keep their original Telegram message reachable.
+    if not rows and problem.get("media_type") and problem.get("media_type") != "نظام" and problem.get("group_message_id"):
+        rows.append({
+            "id": None,
+            "media_type": problem.get("media_type"),
+            "telegram_message_id": problem.get("group_message_id"),
+            "telegram_chat_id": problem.get("telegram_chat_id") or ADMIN_GROUP_ID,
+            "created_at": problem.get("date"),
+            "expires_at": None,
+            "archived_at": None,
+        })
+    for media in rows:
+        expiry = str(media.get("expires_at") or "")
+        media["available_in_app"] = bool(expiry) and expiry >= datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S") and bool(media.get("id"))
+        media["telegram_url"] = telegram_message_url(media.get("telegram_chat_id"), media.get("telegram_message_id"))
+    return rows
+
 async def api_dashboard(request):
     await require_auth(request)
     vehicles = await run_db(get_all_vehicles)
@@ -2284,6 +2355,31 @@ async def api_dashboard(request):
         info = await run_db(get_vehicle_cache_entry, v)
         result.append({"vehicle": v, "status": info["status"], "status_icons": info.get("status_icons", ["normal"]), "open_count": info["open_count"], "remaining_km": info["remaining_km"], "drivers": await run_db(_get_vehicle_drivers, v)})
     return json_ok(result)
+
+async def api_problem_media_file(request):
+    await require_auth(request)
+    try:
+        problem_id = int(request.match_info["id"])
+        media_id = int(request.match_info["media_id"])
+    except (TypeError, ValueError):
+        return json_err("معرّف الوسائط غير صالح", status=400)
+    media = await run_db(get_problem_media_file, problem_id, media_id)
+    if not media or not media.get("telegram_file_id"):
+        return json_err("الوسائط غير متاحة داخل التطبيق؛ افتح الرسالة الأصلية في Telegram", status=404)
+    if media.get("media_type") != "صورة":
+        return json_err("المعاينة داخل التطبيق متاحة للصور فقط؛ افتح الفيديو أو الصوت في Telegram", status=415)
+    expires_at = str(media.get("expires_at") or "")
+    if not expires_at or expires_at < datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S"):
+        return json_err("انتهت مدة الاحتفاظ بالوسائط داخل التطبيق؛ افتحها من Telegram", status=410)
+    telegram_file = await app.bot.get_file(media["telegram_file_id"])
+    content = await telegram_file.download_as_bytearray()
+    media_type = media.get("media_type")
+    content_type = "image/jpeg" if media_type == "صورة" else ("video/mp4" if media_type == "فيديو" else "audio/ogg")
+    return web.Response(
+        body=bytes(content),
+        content_type=content_type,
+        headers={"Cache-Control": "private, max-age=300", "X-Content-Type-Options": "nosniff"},
+    )
 
 async def api_problems_list(request):
     await require_auth(request)
@@ -2302,10 +2398,8 @@ async def api_problems_list(request):
         if search:
             hay = " ".join(str(p.get(k) or "") for k in ("vehicle","driver_name","problem_text","comments","problem_type")).lower()
             if search not in hay: continue
-        p["media"] = await run_db(_get_problem_media, p["id"])
-        for m in p["media"]:
-            m["available_in_app"] = str(m.get("expires_at") or "") >= datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
-            m["telegram_url"] = telegram_message_url(m.get("telegram_chat_id"), m.get("telegram_message_id"))
+        media_rows = await run_db(_get_problem_media, p["id"])
+        p["media"] = _problem_media_for_api(p, media_rows)
         result.append(p)
     return json_ok(result)
 
@@ -2354,7 +2448,8 @@ async def api_problem_comment(request):
         body = await request.json()
     except Exception:
         return json_err("invalid JSON body")
-    text = (body.get("text") or "").strip()
+    # Accept both the current app field ("comment") and legacy clients ("text").
+    text = (body.get("comment") or body.get("text") or "").strip()
     if not text:
         return json_err("النص مطلوب")
     problem = await run_db(get_problem, problem_id)
@@ -2433,6 +2528,9 @@ async def api_vehicle_history(request):
     await require_auth(request)
     vehicle = request.match_info["vehicle"].upper()
     history = await run_db(get_vehicle_history, vehicle)
+    for p in history.get("problems", []):
+        media_rows = await run_db(_get_problem_media, p["id"])
+        p["media"] = _problem_media_for_api(p, media_rows)
     last_vid = await run_db(get_last_vidange_km, vehicle)
     latest = await run_db(get_latest_km, vehicle)
     history["vidange"] = {
@@ -2516,6 +2614,24 @@ async def api_vidange_set(request):
         "remaining_km": ((km + 10000) - latest) if latest is not None else None,
     })
 
+async def api_fix_latest_km(request):
+    await require_auth(request, min_role="super_admin")
+    vehicle = request.match_info["vehicle"].upper()
+    try:
+        body = await request.json()
+        corrected_km = int(body.get("km"))
+    except Exception:
+        return json_err("km مطلوب كرقم صحيح")
+    if corrected_km <= 0:
+        return json_err("القيمة يجب أن تكون أكبر من صفر")
+    vehicles = await run_db(get_all_vehicles)
+    if vehicle not in vehicles:
+        return json_err("المركبة غير موجودة", status=404)
+    success, old_km = await run_db(fix_latest_km_reading, vehicle, corrected_km)
+    if not success:
+        return json_err("لا توجد قراءة عداد مسجلة لهذه المركبة", status=404)
+    return json_ok({"vehicle": vehicle, "previous_km": old_km, "corrected_km": corrected_km})
+
 # ---- التصدير ----
 async def api_export_problems(request):
     await require_auth(request)
@@ -2580,8 +2696,10 @@ async def api_error_middleware(request, handler):
 def register_api_routes(api: web.Application):
     api.router.add_post("/api/auth/verify", api_auth_verify)
     api.router.add_get("/api/auth/session", api_auth_session)
+    api.router.add_post("/api/auth/profile", api_auth_profile_update)
     api.router.add_get("/api/dashboard", api_dashboard)
     api.router.add_get("/api/problems", api_problems_list)
+    api.router.add_get("/api/problems/{id}/media/{media_id}", api_problem_media_file)
     api.router.add_post("/api/problems/{id}/accident", api_problem_convert_accident)
     api.router.add_post("/api/problems/{id}/fix", api_problem_fix)
     api.router.add_post("/api/problems/{id}/comment", api_problem_comment)
@@ -2597,6 +2715,7 @@ def register_api_routes(api: web.Application):
     api.router.add_delete("/api/vehicles/{code}", api_vehicle_remove)
     api.router.add_get("/api/vidange", api_vidange_list)
     api.router.add_post("/api/vidange/{vehicle}/set", api_vidange_set)
+    api.router.add_post("/api/vehicles/{vehicle}/fix-km", api_fix_latest_km)
     api.router.add_get("/api/export/problems", api_export_problems)
     api.router.add_get("/api/export/vidange", api_export_vidange)
     api.router.add_get("/api/admins", api_admins_list)

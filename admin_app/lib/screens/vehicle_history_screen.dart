@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../services/api.dart';
 
 class VehicleHistoryScreen extends StatefulWidget {
@@ -174,9 +175,138 @@ class _VehicleHistoryScreenState extends State<VehicleHistoryScreen> {
           title: Text((item['problem_text'] ?? 'سجل بدون وصف').toString(), maxLines: 2, overflow: TextOverflow.ellipsis),
           subtitle: Text('${item['date'] ?? ''} • ${item['status'] ?? ''}'),
           isThreeLine: false,
+          onTap: () => _showProblemActions(item),
         );
       },
     );
+  }
+
+  Future<void> _showProblemActions(Map<String, dynamic> item) async {
+    final id = int.tryParse(item['id']?.toString() ?? '');
+    if (id == null) return;
+    final comment = TextEditingController(text: (item['comments'] ?? '').toString());
+    final media = List<dynamic>.from(item['media'] ?? []);
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheetContext) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: SafeArea(
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(
+              16, 8, 16, MediaQuery.of(sheetContext).viewInsets.bottom + 16,
+            ),
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text('الشكوى #$id', style: Theme.of(sheetContext).textTheme.titleLarge),
+                  const SizedBox(height: 8),
+                  Text((item['problem_text'] ?? 'لا يوجد وصف').toString()),
+                  const SizedBox(height: 6),
+                  Text('الحالة: ${item['status'] ?? '—'}'),
+                  if (media.isNotEmpty) ...[
+                    const SizedBox(height: 10),
+                    const Text('الوسائط', style: TextStyle(fontWeight: FontWeight.bold)),
+                    ...media.map((raw) {
+                      final m = Map<String, dynamic>.from(raw);
+                      final mediaId = int.tryParse(m['id']?.toString() ?? '');
+                      final url = (m['telegram_url'] ?? '').toString();
+                      return ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: m['available_in_app'] == true && mediaId != null && m['media_type'] == 'صورة'
+                            ? FutureBuilder<Map<String, String>>(
+                                future: Api.instance.mediaHeaders(),
+                                builder: (context, snapshot) => snapshot.hasData
+                                    ? Image.network(
+                                        Api.instance.mediaUrl(id, mediaId),
+                                        headers: snapshot.data,
+                                        width: 56,
+                                        height: 56,
+                                        fit: BoxFit.cover,
+                                        errorBuilder: (_, __, ___) => const Icon(Icons.broken_image_outlined),
+                                      )
+                                    : const SizedBox(width: 56, height: 56, child: Center(child: CircularProgressIndicator(strokeWidth: 2))),
+                              )
+                            : Icon(m['media_type'] == 'فيديو' ? Icons.videocam : Icons.photo),
+                        title: Text('الوسائط • ${m['media_type'] ?? 'Telegram'}'),
+                        subtitle: Text((m['media_type'] ?? 'وسائط').toString()),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.open_in_new),
+                          onPressed: url.isEmpty ? null : () async {
+                            final uri = Uri.tryParse(url);
+                            if (uri != null) await launchUrl(uri, mode: LaunchMode.externalApplication);
+                          },
+                        ),
+                      );
+                    }),
+                  ],
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: comment,
+                    minLines: 1,
+                    maxLines: 3,
+                    decoration: const InputDecoration(
+                      labelText: 'تعليق الإصلاح',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  FilledButton.icon(
+                    onPressed: () async {
+                      if (comment.text.trim().isEmpty) {
+                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('اكتب تعليقاً أولاً')));
+                        return;
+                      }
+                      try {
+                        await Api.instance.commentProblem(id, comment.text.trim());
+                        if (sheetContext.mounted) Navigator.pop(sheetContext);
+                        await load();
+                        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم حفظ التعليق')));
+                      } catch (e) {
+                        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر حفظ التعليق: $e')));
+                      }
+                    },
+                    icon: const Icon(Icons.comment_outlined),
+                    label: const Text('حفظ التعليق'),
+                  ),
+                  if (item['problem_type'] != 'accident')
+                    OutlinedButton.icon(
+                      onPressed: () async {
+                        try {
+                          await Api.instance.convertAccident(id);
+                          if (sheetContext.mounted) Navigator.pop(sheetContext);
+                          await load();
+                        } catch (e) {
+                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر التحويل إلى حادث: $e')));
+                        }
+                      },
+                      icon: const Icon(Icons.warning_amber_rounded, color: Color(0xFF7B3FF2)),
+                      label: const Text('تحويل إلى حادث'),
+                    ),
+                  OutlinedButton.icon(
+                    onPressed: () async {
+                      try {
+                        await Api.instance.fixProblem(id);
+                        if (sheetContext.mounted) Navigator.pop(sheetContext);
+                        await load();
+                      } catch (e) {
+                        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر تسجيل الإصلاح: $e')));
+                      }
+                    },
+                    icon: const Icon(Icons.check_circle_outline),
+                    label: const Text('تسجيل الإصلاح'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    comment.dispose();
   }
 
   Widget _metric(String label, dynamic value, {String suffix = ' KM'}) {
