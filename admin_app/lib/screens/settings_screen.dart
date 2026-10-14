@@ -41,8 +41,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  Future<String?> _ask(String title, String hint) async {
-    final c = TextEditingController();
+  Future<String?> _ask(String title, String hint, {String initialValue = ''}) async {
+    final c = TextEditingController(text: initialValue);
     final value = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -252,7 +252,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _editProfile() async {
     final current = (profile?['display_name'] ?? '').toString();
-    final displayName = await _ask('تعديل الملف الشخصي', 'الاسم الظاهر داخل التطبيق');
+    final displayName = await _ask('تعديل الملف الشخصي', 'الاسم الظاهر داخل التطبيق', initialValue: current);
     if (displayName == null || displayName.trim().isEmpty || !mounted) return;
     if (displayName.trim().length < 2 || displayName.trim().length > 60) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('الاسم يجب أن يكون بين حرفين و60 حرفاً')));
