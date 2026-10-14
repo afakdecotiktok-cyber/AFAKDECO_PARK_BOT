@@ -236,8 +236,14 @@ class Api {
   Future<void> fixProblem(int id) async =>
       request('POST', '/api/problems/$id/fix');
 
+  Future<void> setProblemStatus(int id, String status) async =>
+      request('POST', '/api/problems/$id/status', body: {'status': status});
+
   Future<void> commentProblem(int id, String comment) async =>
       request('POST', '/api/problems/$id/comment', body: {'text': comment});
+
+  Future<void> deleteProblem(int id) async =>
+      request('DELETE', '/api/problems/$id');
 
   Future<void> convertAccident(int id) async =>
       request('POST', '/api/problems/$id/accident');
