@@ -45,8 +45,8 @@ int? _asInt(dynamic value) {
   return int.tryParse(value?.toString().trim() ?? '');
 }
 
-class _CombinedHistoryEntry {
-  const _CombinedHistoryEntry({
+class CombinedHistoryEntry {
+  const CombinedHistoryEntry({
     required this.kind,
     required this.data,
     required this.date,
@@ -59,17 +59,17 @@ class _CombinedHistoryEntry {
   final int sourceOrder;
 }
 
-List<_CombinedHistoryEntry> buildCombinedHistory(
+List<CombinedHistoryEntry> buildCombinedHistory(
   List<dynamic> problems,
   List<Map<String, dynamic>> readings,
 ) {
-  final entries = <_CombinedHistoryEntry>[];
+  final entries = <CombinedHistoryEntry>[];
   var order = 0;
 
   for (final raw in problems) {
     if (raw is! Map) continue;
     final problem = Map<String, dynamic>.from(raw);
-    entries.add(_CombinedHistoryEntry(
+    entries.add(CombinedHistoryEntry(
       kind: 'problem',
       data: problem,
       date: _readingDate(problem),
@@ -78,7 +78,7 @@ List<_CombinedHistoryEntry> buildCombinedHistory(
   }
 
   for (final reading in readings) {
-    entries.add(_CombinedHistoryEntry(
+    entries.add(CombinedHistoryEntry(
       kind: 'reading',
       data: reading,
       date: _readingDate(reading),
