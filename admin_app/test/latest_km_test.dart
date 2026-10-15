@@ -34,4 +34,27 @@ void main() {
     expect(selectLatestReading([]), isNull);
     expect(sortReadingsNewestFirst([]), isEmpty);
   });
+
+  test('combined vehicle history merges problems and readings by date', () {
+    final timeline = buildCombinedHistory(
+      [
+        {'id': 4, 'date': '2026-03-08 09:00:00'},
+        {'id': 5, 'date': '2026-02-20 10:00:00'},
+      ],
+      [
+        {'km': 24000, 'date': '2026-03-09 08:00:00'},
+        {'km': 18000, 'date': '2026-03-01 12:00:00'},
+      ],
+    );
+
+    expect(timeline.map((entry) => entry.kind).toList(), [
+      'reading',
+      'problem',
+      'reading',
+      'problem',
+    ]);
+    expect(timeline.first.data['km'], 24000);
+    expect(timeline.last.data['id'], 5);
+  });
 }
+
