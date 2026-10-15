@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../services/api.dart';
+import '../theme/app_colors.dart';
 import '../widgets/status_icons.dart';
 
 class ProblemsScreen extends StatefulWidget {
@@ -149,10 +150,10 @@ class _ProblemsScreenState extends State<ProblemsScreen> {
                                 clipBehavior: Clip.antiAlias,
                                 child: ListTile(
                                   leading: CircleAvatar(
-                                    backgroundColor: accident ? const Color(0xFF7B3FF2).withValues(alpha: .12) : null,
+                                    backgroundColor: accident ? AppColors.of(context).tint(AppColors.of(context).accident) : null,
                                     child: Icon(
                                       accident ? Icons.warning_rounded : Icons.report_problem_outlined,
-                                      color: accident ? const Color(0xFF7B3FF2) : null,
+                                      color: accident ? AppColors.of(context).accident : null,
                                     ),
                                   ),
                                   title: Text('${p['vehicle'] ?? '-'} • ${p['driver_name'] ?? '-'}'),
@@ -186,9 +187,7 @@ class _ProblemsScreenState extends State<ProblemsScreen> {
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
-      builder: (sheetContext) => Directionality(
-        textDirection: Directionality.of(sheetContext),
-        child: SafeArea(
+      builder: (sheetContext) => SafeArea(
           child: Padding(
             padding: EdgeInsets.only(
               left: 18,
@@ -240,7 +239,7 @@ class _ProblemsScreenState extends State<ProblemsScreen> {
                                       )
                                     : const SizedBox(width: 56, height: 56, child: Center(child: CircularProgressIndicator(strokeWidth: 2))),
                               )
-                            : Icon(m['media_type'] == 'فيديو' ? Icons.videocam : Icons.photo, color: available ? null : Colors.grey),
+                            : Icon(m['media_type'] == 'فيديو' ? Icons.videocam : Icons.photo, color: available ? null : AppColors.of(context).textSecondary),
                         title: Text(available ? 'وسائط محفوظة في التطبيق / Telegram' : 'مؤرشفة في Telegram'),
                         subtitle: Text(available ? 'المصدر الأصلي محفوظ في Telegram' : 'انتهت مدة العرض داخل التطبيق (30 يوماً)'),
                         trailing: url.isNotEmpty ? IconButton(
@@ -289,7 +288,7 @@ class _ProblemsScreenState extends State<ProblemsScreen> {
                           if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر التحويل: $e')));
                         }
                       },
-                      icon: const Icon(Icons.warning_amber_rounded, color: Color(0xFF7B3FF2)),
+                      icon: Icon(Icons.warning_amber_rounded, color: AppColors.of(context).accident),
                       label: const Text('تحويل هذا السجل إلى حادث'),
                     ),
                   if (p['ruglee'] != 'تم الإصلاح')
@@ -308,7 +307,7 @@ class _ProblemsScreenState extends State<ProblemsScreen> {
                         }
                       },
                       icon: Icon(p['status'] == 'قيد التصليح' ? Icons.undo : Icons.build_outlined),
-                      label: Text(p['status'] == 'قيد التصليح' ? 'إعادة إلى En attente' : 'En cours de traitement'),
+                      label: Text(p['status'] == 'قيد التصليح' ? 'إعادة إلى قيد الانتظار' : 'نقل إلى قيد التصليح'),
                     ),
                   if (p['ruglee'] != 'تم الإصلاح' && p['status'] == 'قيد التصليح')
                     OutlinedButton.icon(
@@ -323,16 +322,16 @@ class _ProblemsScreenState extends State<ProblemsScreen> {
                         }
                       },
                       icon: const Icon(Icons.check_circle_outline),
-                      label: const Text('Mark as fixed / تم الإصلاح'),
+                      label: const Text('تسجيل الإصلاح'),
                     ),
                   if (p['ruglee'] == 'تم الإصلاح')
-                    const ListTile(
+                    ListTile(
                       contentPadding: EdgeInsets.zero,
-                      leading: Icon(Icons.check_circle, color: Colors.green),
-                      title: Text('تم الإصلاح'),
+                      leading: Icon(Icons.check_circle, color: AppColors.of(context).normal),
+                      title: const Text('تم الإصلاح'),
                     ),
                   OutlinedButton.icon(
-                      style: OutlinedButton.styleFrom(foregroundColor: const Color(0xFFDC4545)),
+                      style: OutlinedButton.styleFrom(foregroundColor: AppColors.of(context).pending),
                       onPressed: () async {
                         final confirmed = await showDialog<bool>(
                           context: sheetContext,
@@ -356,14 +355,13 @@ class _ProblemsScreenState extends State<ProblemsScreen> {
                         }
                       },
                       icon: const Icon(Icons.delete_outline),
-                      label: const Text('Delete / حذف'),
+                      label: const Text('حذف السجل'),
                     ),
                 ],
               ),
             ),
           ),
         ),
-      ),
     );
     commentController.dispose();
   }
@@ -373,7 +371,7 @@ class _ProblemsScreenState extends State<ProblemsScreen> {
     child: Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        SizedBox(width: 90, child: Text(label, style: const TextStyle(color: Colors.grey))),
+        SizedBox(width: 90, child: Text(label, style: TextStyle(color: AppColors.of(context).textSecondary))),
         Expanded(child: Text((value ?? '—').toString(), style: const TextStyle(fontWeight: FontWeight.w600))),
       ],
     ),
