@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:share_plus/share_plus.dart';
 import '../l10n/strings.dart';
 import '../services/api.dart';
+import '../services/app_data_events.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_text.dart';
 import '../widgets/app_widgets.dart';
@@ -114,7 +115,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       const SizedBox(height: AppSpacing.xs),
                       Text(profile == null ? 'بيانات الحساب غير متوفرة بعد' : 'Telegram ID: $userId', style: AppText.caption.copyWith(color: colors.textSecondary)),
                       const SizedBox(height: AppSpacing.xs),
-                      StatusChip(status: 'normal', label: role == 'super_admin' ? 'المشرف الأعلى' : role == 'admin' ? 'مشرف' : role),
+                      Container(
+                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.xs),
+                decoration: BoxDecoration(
+                  color: colors.surfaceAlt,
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: Text(
+                  role == 'super_admin' ? 'المشرف الأعلى' : role == 'admin' ? 'مشرف' : role,
+                  style: AppText.caption.copyWith(
+                    color: colors.textSecondary,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
                     ],
                   ),
                 ),
@@ -228,7 +242,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 icon: Icons.cached_rounded,
                 title: 'مسح التخزين المؤقت',
                 subtitle: 'إزالة النسخ المحلية وإعادة تحميل البيانات',
-                onTap: busy ? null : () => _run(Api.instance.clearApiCache, 'تم مسح التخزين المؤقت'),
+                onTap: busy ? null : () => _run(() async {
+                  await Api.instance.clearApiCache();
+                  AppDataEvents.notifyChanged();
+                }, 'تم مسح التخزين المؤقت وإعادة تحميل البيانات'),
               ),
             ],
           ),
