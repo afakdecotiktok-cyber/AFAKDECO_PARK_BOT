@@ -529,20 +529,29 @@ class _VehicleCard extends StatelessWidget {
                               ),
                               const SizedBox(width: 4),
                               Expanded(
-                                child: Directionality(
-                                  textDirection: TextDirection.ltr,
-                                  child: Text(
-                                    overdue
-                                        ? 'تجاوز موعد Vidange بـ ${remaining.abs()} KM'
-                                        : 'المتبقي لـ Vidange: $remaining KM',
-                                    textAlign: TextAlign.start,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: AppText.caption.copyWith(
-                                      color: overdue ? colors.pending : colors.textSecondary,
-                                      fontWeight: overdue ? FontWeight.w700 : FontWeight.w500,
+                                child: Text.rich(
+                                  TextSpan(children: [
+                                    TextSpan(
+                                      text: overdue
+                                          ? 'تجاوز موعد Vidange بـ '
+                                          : 'المتبقي لـ Vidange: ',
                                     ),
-                                  ),
+                                    WidgetSpan(
+                                      alignment: PlaceholderAlignment.middle,
+                                      child: Directionality(
+                                        textDirection: TextDirection.ltr,
+                                        child: Text(
+                                          '${overdue ? remaining.abs() : remaining} KM',
+                                          style: AppText.caption.copyWith(
+                                            color: overdue ? colors.pending : colors.textSecondary,
+                                            fontWeight: overdue ? FontWeight.w700 : FontWeight.w500,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ]),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
                                 ),
                               ),
                             ],
