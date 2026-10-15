@@ -11,4 +11,8 @@ abstract final class AppSpacing {
   static const double sheetRadius = 24;
   static const double touchTarget = 48;
   static const double screenPadding = 16;
+
+  static const Duration motionFast = Duration(milliseconds: 150);
+  static const Duration motionStandard = Duration(milliseconds: 200);
+  static const Duration motionSlow = Duration(milliseconds: 250);
 }

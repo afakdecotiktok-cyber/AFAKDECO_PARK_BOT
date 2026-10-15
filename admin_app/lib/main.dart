@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'screens/home_screen.dart';
 import 'screens/login_screen.dart';
 import 'services/api.dart';
+import 'theme/app_spacing.dart';
 import 'theme/app_theme.dart';
 import 'widgets/app_widgets.dart';
 
@@ -75,39 +76,50 @@ class _AppSplash extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final duration = MediaQuery.disableAnimationsOf(context)
+        ? Duration.zero
+        : AppSpacing.motionStandard;
+
     return Scaffold(
       body: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 68,
-              height: 68,
-              decoration: BoxDecoration(
-                color: theme.colorScheme.primary,
-                borderRadius: BorderRadius.circular(22),
+        child: TweenAnimationBuilder<double>(
+          tween: Tween<double>(begin: 0, end: 1),
+          duration: duration,
+          curve: Curves.easeOutCubic,
+          builder: (context, opacity, child) =>
+              Opacity(opacity: opacity, child: child),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 68,
+                height: 68,
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.primary,
+                  borderRadius: BorderRadius.circular(22),
+                ),
+                child: Icon(
+                  Icons.local_shipping_rounded,
+                  color: theme.colorScheme.onPrimary,
+                  size: 34,
+                ),
               ),
-              child: Icon(
-                Icons.local_shipping_rounded,
-                color: theme.colorScheme.onPrimary,
-                size: 34,
+              const SizedBox(height: 18),
+              Text(
+                'AFAKDECO PARK',
+                style: theme.textTheme.titleLarge?.copyWith(
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: .1,
+                ),
               ),
-            ),
-            const SizedBox(height: 18),
-            Text(
-              'AFAKDECO PARK',
-              style: theme.textTheme.titleLarge?.copyWith(
-                fontWeight: FontWeight.w800,
-                letterSpacing: .1,
+              const SizedBox(height: 8),
+              const SizedBox(
+                width: 24,
+                height: 24,
+                child: CircularProgressIndicator(strokeWidth: 2),
               ),
-            ),
-            const SizedBox(height: 8),
-            const SizedBox(
-              width: 24,
-              height: 24,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
