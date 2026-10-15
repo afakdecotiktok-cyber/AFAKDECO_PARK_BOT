@@ -373,20 +373,6 @@ class _ProblemsScreenState extends State<ProblemsScreen> {
                   onChanged: (_) => setState(() {}),
                   onSubmitted: (_) {},
                   textInputAction: TextInputAction.search,
-                  suffixIcon: _searchController.text.isEmpty
-                      ? IconButton(
-                          tooltip: 'فتح البحث',
-                          onPressed: () => FocusScope.of(context).requestFocus(),
-                          icon: const Icon(Icons.search_rounded),
-                        )
-                      : IconButton(
-                          tooltip: 'مسح البحث',
-                          onPressed: () {
-                            _searchController.clear();
-                            setState(() {});
-                          },
-                          icon: const Icon(Icons.close_rounded),
-                        ),
                 ),
                 const SizedBox(height: AppSpacing.md),
                 SingleChildScrollView(
