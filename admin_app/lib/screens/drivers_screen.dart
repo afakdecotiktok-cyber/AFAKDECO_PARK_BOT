@@ -354,8 +354,9 @@ class _DriverHistorySheetState extends State<_DriverHistorySheet> {
                   IconButton(
                     tooltip: 'فتح سجل المركبة',
                     onPressed: () {
-                      Navigator.pop(context);
-                      Navigator.of(context).push(
+                      final navigator = Navigator.of(context);
+                      navigator.pop();
+                      navigator.push(
                         MaterialPageRoute<void>(
                           builder: (_) => VehicleHistoryScreen(
                             vehicle: vehicle,
