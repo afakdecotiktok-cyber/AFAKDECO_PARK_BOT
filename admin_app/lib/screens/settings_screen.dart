@@ -319,9 +319,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         context: context,
         isScrollControlled: true,
         showDragHandle: true,
-        builder: (sheetContext) => Directionality(
-          textDirection: TextDirection.rtl,
-          child: SafeArea(
+        builder: (sheetContext) => SafeArea(
             child: ListView(
               shrinkWrap: true,
               padding: const EdgeInsets.all(16),
@@ -372,7 +370,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ],
             ),
           ),
-        ),
       );
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر جلب بيانات Vidange: $e')));
@@ -389,9 +386,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       await showModalBottomSheet<void>(
         context: context,
         showDragHandle: true,
-        builder: (ctx) => Directionality(
-          textDirection: TextDirection.rtl,
-          child: SafeArea(
+        builder: (ctx) => SafeArea(
             child: ListView(
               shrinkWrap: true,
               padding: const EdgeInsets.all(16),
@@ -432,7 +427,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ],
             ),
           ),
-        ),
       );
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر جلب المشرفين: $e')));
