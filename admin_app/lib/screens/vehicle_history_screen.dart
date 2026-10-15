@@ -532,7 +532,7 @@ class _VehicleHistoryScreenState extends State<VehicleHistoryScreen> {
             }
           }
 
-          final fixed = item['ruglee'] == 'تم الإصلاح'];
+          final fixed = item['ruglee'] == 'تم الإصلاح';
           final status = (item['status'] ?? AppStrings.waiting).toString();
           final isAccident = item['problem_type'] == 'accident';
           final isVidangeSystem = item['media_type'] == 'نظام' || item['problem_type'] == 'vidange';
