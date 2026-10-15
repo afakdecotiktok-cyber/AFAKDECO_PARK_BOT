@@ -3,6 +3,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../l10n/strings.dart';
 import '../services/api.dart';
+import '../services/app_data_events.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_text.dart';
@@ -116,6 +117,7 @@ class _VehicleHistoryScreenState extends State<VehicleHistoryScreen> {
   bool _loading = true;
   bool _refreshing = false;
   bool _savingVidange = false;
+  int _loadGeneration = 0;
   String? _error;
   Map<String, dynamic>? _data;
   int _tab = 0;
@@ -123,11 +125,23 @@ class _VehicleHistoryScreenState extends State<VehicleHistoryScreen> {
   @override
   void initState() {
     super.initState();
+    AppDataEvents.revision.addListener(_onDataChanged);
     _load();
+  }
+
+  void _onDataChanged() {
+    if (mounted) _load();
+  }
+
+  @override
+  void dispose() {
+    AppDataEvents.revision.removeListener(_onDataChanged);
+    super.dispose();
   }
 
   Future<void> _load() async {
     if (!mounted) return;
+    final generation = ++_loadGeneration;
     final hadData = _data != null;
     setState(() {
       _loading = !hadData;
@@ -136,18 +150,18 @@ class _VehicleHistoryScreenState extends State<VehicleHistoryScreen> {
     });
     try {
       final result = await Api.instance.vehicleHistory(widget.vehicle);
-      if (!mounted) return;
+      if (!mounted || generation != _loadGeneration) return;
       setState(() {
         _data = result;
         _error = null;
       });
     } catch (error) {
-      if (!mounted) return;
+      if (!mounted || generation != _loadGeneration) return;
       final message = friendlyError(error);
       setState(() => _error = message);
       if (hadData) AppSnackbar.error(context, message);
     } finally {
-      if (mounted) {
+      if (mounted && generation == _loadGeneration) {
         setState(() {
           _loading = false;
           _refreshing = false;
@@ -851,7 +865,6 @@ class _VehicleHistoryScreenState extends State<VehicleHistoryScreen> {
               await action();
               if (!sheetContext.mounted) return;
               Navigator.pop(sheetContext);
-              await _load();
               if (mounted) AppSnackbar.success(this.context, successMessage);
             } catch (error) {
               if (mounted) AppSnackbar.error(this.context, friendlyError(error));
@@ -1121,7 +1134,6 @@ class _VehicleHistoryScreenState extends State<VehicleHistoryScreen> {
           context,
           'تم الحفظ. القيمة القادمة: ${result['next_vidange_km'] ?? km + 10000} KM',
         );
-        await _load();
         if (mounted) setState(() => _tab = 3);
       } catch (error) {
         if (mounted) AppSnackbar.error(context, friendlyError(error));

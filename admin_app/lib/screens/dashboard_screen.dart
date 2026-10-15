@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../l10n/strings.dart';
 import '../services/api.dart';
+import '../services/app_data_events.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_text.dart';
@@ -102,6 +103,7 @@ class DashboardScreen extends StatefulWidget {
 class DashboardScreenState extends State<DashboardScreen> {
   bool _loading = true;
   bool _refreshing = false;
+  int _loadGeneration = 0;
   String? _error;
   List<dynamic> _vehicles = [];
   String _query = '';
@@ -111,11 +113,17 @@ class DashboardScreenState extends State<DashboardScreen> {
   @override
   void initState() {
     super.initState();
+    AppDataEvents.revision.addListener(_onDataChanged);
     _load();
+  }
+
+  void _onDataChanged() {
+    if (mounted) _load();
   }
 
   @override
   void dispose() {
+    AppDataEvents.revision.removeListener(_onDataChanged);
     _searchController.dispose();
     super.dispose();
   }
@@ -124,31 +132,29 @@ class DashboardScreenState extends State<DashboardScreen> {
 
   Future<void> _load({bool showSuccess = false}) async {
     if (!mounted) return;
+    final generation = ++_loadGeneration;
     final hadData = _vehicles.isNotEmpty;
     setState(() {
       _loading = !hadData;
       _refreshing = hadData;
       _error = null;
     });
-
     var succeeded = false;
     try {
       final fresh = await Api.instance.dashboard();
-      if (!mounted) return;
+      if (!mounted || generation != _loadGeneration) return;
       setState(() {
         _vehicles = fresh;
         _error = null;
       });
       succeeded = true;
     } catch (error) {
-      if (!mounted) return;
+      if (!mounted || generation != _loadGeneration) return;
       final message = friendlyError(error);
       setState(() => _error = message);
-      if (hadData) {
-        AppSnackbar.error(context, message);
-      }
+      if (hadData) AppSnackbar.error(context, message);
     } finally {
-      if (mounted) {
+      if (mounted && generation == _loadGeneration) {
         setState(() {
           _loading = false;
           _refreshing = false;
@@ -157,7 +163,8 @@ class DashboardScreenState extends State<DashboardScreen> {
     }
     if (succeeded && showSuccess && mounted) {
       AppSnackbar.success(context, 'تم تحديث بيانات المركبات');
-    } else if (!succeeded && !hadData && mounted && _error == null) {
+    } else if (!succeeded && !hadData && mounted && _error == null &&
+        generation == _loadGeneration) {
       setState(() => _error = 'تعذر تحميل بيانات المركبات.');
     }
   }

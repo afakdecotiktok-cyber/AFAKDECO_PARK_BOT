@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../l10n/strings.dart';
 import '../services/api.dart';
+import '../services/app_data_events.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_text.dart';
@@ -18,6 +19,7 @@ class DriversScreen extends StatefulWidget {
 class _DriversScreenState extends State<DriversScreen> {
   bool _loading = true;
   bool _refreshing = false;
+  int _loadGeneration = 0;
   String? _error;
   List<dynamic> _drivers = [];
   String _query = '';
@@ -26,17 +28,24 @@ class _DriversScreenState extends State<DriversScreen> {
   @override
   void initState() {
     super.initState();
+    AppDataEvents.revision.addListener(_onDataChanged);
     _load();
+  }
+
+  void _onDataChanged() {
+    if (mounted) _load();
   }
 
   @override
   void dispose() {
+    AppDataEvents.revision.removeListener(_onDataChanged);
     _search.dispose();
     super.dispose();
   }
 
   Future<void> _load() async {
     if (!mounted) return;
+    final generation = ++_loadGeneration;
     final hadData = _drivers.isNotEmpty;
     setState(() {
       _loading = !hadData;
@@ -45,18 +54,18 @@ class _DriversScreenState extends State<DriversScreen> {
     });
     try {
       final result = await Api.instance.drivers();
-      if (!mounted) return;
+      if (!mounted || generation != _loadGeneration) return;
       setState(() {
         _drivers = result;
         _error = null;
       });
     } catch (error) {
-      if (!mounted) return;
+      if (!mounted || generation != _loadGeneration) return;
       final message = friendlyError(error);
       setState(() => _error = message);
       if (hadData) AppSnackbar.error(context, message);
     } finally {
-      if (mounted) {
+      if (mounted && generation == _loadGeneration) {
         setState(() {
           _loading = false;
           _refreshing = false;
