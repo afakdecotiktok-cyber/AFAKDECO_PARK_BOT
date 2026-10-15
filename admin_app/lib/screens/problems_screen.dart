@@ -605,16 +605,13 @@ class _ProblemCard extends StatelessWidget {
                     Row(
                       children: [
                         Expanded(
-                          child: Directionality(
-                            textDirection: TextDirection.ltr,
-                            child: Text(
-                              code,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: AppText.label.copyWith(
-                                fontSize: 15,
-                                color: colors.textPrimary,
-                              ),
+                          child: Text(
+                            code,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: AppText.label.copyWith(
+                              fontSize: 15,
+                              color: colors.textPrimary,
                             ),
                           ),
                         ),
