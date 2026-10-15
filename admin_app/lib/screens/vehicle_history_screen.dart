@@ -45,6 +45,59 @@ int? _asInt(dynamic value) {
   return int.tryParse(value?.toString().trim() ?? '');
 }
 
+class _CombinedHistoryEntry {
+  const _CombinedHistoryEntry({
+    required this.kind,
+    required this.data,
+    required this.date,
+    required this.sourceOrder,
+  });
+
+  final String kind;
+  final Map<String, dynamic> data;
+  final DateTime? date;
+  final int sourceOrder;
+}
+
+List<_CombinedHistoryEntry> buildCombinedHistory(
+  List<dynamic> problems,
+  List<Map<String, dynamic>> readings,
+) {
+  final entries = <_CombinedHistoryEntry>[];
+  var order = 0;
+
+  for (final raw in problems) {
+    if (raw is! Map) continue;
+    final problem = Map<String, dynamic>.from(raw);
+    entries.add(_CombinedHistoryEntry(
+      kind: 'problem',
+      data: problem,
+      date: _readingDate(problem),
+      sourceOrder: order++,
+    ));
+  }
+
+  for (final reading in readings) {
+    entries.add(_CombinedHistoryEntry(
+      kind: 'reading',
+      data: reading,
+      date: _readingDate(reading),
+      sourceOrder: order++,
+    ));
+  }
+
+  entries.sort((a, b) {
+    if (a.date == null && b.date != null) return 1;
+    if (a.date != null && b.date == null) return -1;
+    if (a.date != null && b.date != null) {
+      final byDate = b.date!.compareTo(a.date!);
+      if (byDate != 0) return byDate;
+    }
+    return a.sourceOrder.compareTo(b.sourceOrder);
+  });
+  return entries;
+}
+
 class VehicleHistoryScreen extends StatefulWidget {
   final String vehicle;
   final Map<String, dynamic>? vehicleData;
@@ -351,6 +404,10 @@ class _VehicleHistoryScreenState extends State<VehicleHistoryScreen> {
       );
     }
 
+    if (_tab == 0) {
+      return _buildCombinedTimeline(problems, readings);
+    }
+
     final filtered = _tab == 2
         ? problems.where((p) => p is Map && p['problem_type'] == 'accident').toList()
         : _tab == 1
@@ -435,6 +492,230 @@ class _VehicleHistoryScreenState extends State<VehicleHistoryScreen> {
             ),
           );
         },
+      ),
+    );
+  }
+
+
+  Widget _buildCombinedTimeline(
+    List<dynamic> problems,
+    List<Map<String, dynamic>> readings,
+  ) {
+    final entries = buildCombinedHistory(problems, readings);
+    if (entries.isEmpty) {
+      return RefreshIndicator(
+        onRefresh: _load,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          children: const [
+            SizedBox(height: 56),
+            EmptyState(
+              title: 'لا يوجد سجل لهذه المركبة',
+              description: 'ستظهر هنا الشكاوى والحوادث وقراءات الكيلومترات.',
+              icon: Icons.history_rounded,
+            ),
+          ],
+        ),
+      );
+    }
+
+    final colors = AppColors.of(context);
+    final children = <Widget>[];
+    String? previousGroup;
+
+    for (var index = 0; index < entries.length; index++) {
+      final entry = entries[index];
+      final rawDate = (entry.data['date'] ?? '').toString().trim();
+      final group = rawDate.length >= 10
+          ? rawDate.substring(0, 10)
+          : 'تاريخ غير متاح';
+
+      if (group != previousGroup) {
+        children.add(
+          Padding(
+            padding: const EdgeInsetsDirectional.fromSTEB(
+              2,
+              AppSpacing.md,
+              2,
+              AppSpacing.sm,
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 7,
+                  height: 7,
+                  decoration: BoxDecoration(
+                    color: colors.primary,
+                    borderRadius: BorderRadius.circular(99),
+                  ),
+                ),
+                const SizedBox(width: AppSpacing.sm),
+                Text(
+                  group,
+                  style: AppText.label.copyWith(color: colors.textSecondary),
+                ),
+              ],
+            ),
+          ),
+        );
+        previousGroup = group;
+      }
+
+      final isReading = entry.kind == 'reading';
+      final data = entry.data;
+      final accident = !isReading && data['problem_type'] == 'accident';
+      final systemVidange = !isReading &&
+          (data['media_type'] == 'نظام' || data['problem_type'] == 'vidange');
+      final fixed = !isReading && data['ruglee'] == 'تم الإصلاح';
+      final status = isReading
+          ? AppStrings.kilometres
+          : accident
+              ? AppStrings.accident
+              : systemVidange
+                  ? AppStrings.vidange
+                  : fixed
+                      ? AppStrings.fixed
+                      : (data['status'] ?? AppStrings.waiting).toString();
+      final statusKey = isReading
+          ? 'primary'
+          : accident
+              ? 'accident'
+              : systemVidange
+                  ? 'vidange'
+                  : status;
+      final statusColor = statusKey == 'primary'
+          ? colors.primary
+          : colors.statusColor(statusKey);
+      final km = isReading ? _asInt(data['km']) : null;
+      final title = isReading
+          ? (km == null ? 'قراءة كيلومترات' : 'قراءة عداد • $km KM')
+          : (data['problem_text'] ?? 'سجل بدون وصف').toString();
+
+      children.add(
+        Padding(
+          padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              SizedBox(
+                width: 24,
+                child: Column(
+                  children: [
+                    Container(
+                      width: 10,
+                      height: 10,
+                      margin: const EdgeInsets.only(top: 17),
+                      decoration: BoxDecoration(
+                        color: statusColor,
+                        borderRadius: BorderRadius.circular(99),
+                      ),
+                    ),
+                    if (index < entries.length - 1)
+                      Expanded(
+                        child: Container(
+                          width: 2,
+                          color: colors.border,
+                          margin: const EdgeInsets.only(top: 4),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: AppCard(
+                  padding: const EdgeInsets.all(AppSpacing.md),
+                  onTap: isReading ? null : () => _showProblemActions(data),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Container(
+                        width: 38,
+                        height: 38,
+                        decoration: BoxDecoration(
+                          color: colors.tint(statusColor),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Icon(
+                          isReading
+                              ? Icons.speed_rounded
+                              : accident
+                                  ? Icons.warning_rounded
+                                  : systemVidange
+                                      ? Icons.handyman_rounded
+                                      : Icons.assignment_outlined,
+                          color: statusColor,
+                          size: 20,
+                        ),
+                      ),
+                      const SizedBox(width: AppSpacing.md),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              title,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: AppText.label.copyWith(
+                                fontSize: 14,
+                                color: colors.textPrimary,
+                              ),
+                            ),
+                            const SizedBox(height: AppSpacing.xs),
+                            Directionality(
+                              textDirection: TextDirection.ltr,
+                              child: Text(
+                                rawDate.isEmpty ? 'تاريخ غير متاح' : rawDate,
+                                style: AppText.caption.copyWith(
+                                  color: colors.textSecondary,
+                                ),
+                              ),
+                            ),
+                            if (isReading &&
+                                (data['driver_name'] ?? '').toString().trim().isNotEmpty)
+                              Text(
+                                'السائق: ${data['driver_name']}',
+                                style: AppText.caption.copyWith(
+                                  color: colors.textSecondary,
+                                ),
+                              ),
+                            const SizedBox(height: AppSpacing.sm),
+                            StatusChip(
+                              status: isReading ? 'vidange' : status,
+                              label: isReading ? AppStrings.kilometres : status,
+                              icon: isReading ? Icons.speed_rounded : null,
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (!isReading) ...[
+                        const SizedBox(width: AppSpacing.xs),
+                        Icon(
+                          Icons.chevron_left_rounded,
+                          color: colors.textSecondary,
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return RefreshIndicator(
+      onRefresh: _load,
+      child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsetsDirectional.fromSTEB(
+          AppSpacing.lg,
+          0,
+          AppSpacing.lg,
+          AppSpacing.xl,
+        ),
+        children: children,
       ),
     );
   }
