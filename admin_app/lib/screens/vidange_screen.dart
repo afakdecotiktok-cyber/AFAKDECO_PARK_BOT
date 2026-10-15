@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../l10n/strings.dart';
+
 import '../services/api.dart';
 import '../services/app_data_events.dart';
 import '../theme/app_colors.dart';

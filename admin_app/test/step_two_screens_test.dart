@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:afakdeco_admin/screens/problems_screen.dart';
 import 'package:afakdeco_admin/screens/vidange_screen.dart';
+import 'package:afakdeco_admin/services/app_data_events.dart';
 
 void main() {
   group('Reclamation filters and order', () {
@@ -37,6 +38,17 @@ void main() {
       expect(counts['fixed'], 1);
       expect(counts['vidange'], 1);
     });
+  });
+
+  test('shared data revision notifies mounted screens', () {
+    final original = AppDataEvents.revision.value;
+    var notifications = 0;
+    void listener() => notifications++;
+    AppDataEvents.revision.addListener(listener);
+    AppDataEvents.notifyChanged();
+    AppDataEvents.revision.removeListener(listener);
+    expect(AppDataEvents.revision.value, original + 1);
+    expect(notifications, 1);
   });
 
   group('Vidange overview calculations', () {
