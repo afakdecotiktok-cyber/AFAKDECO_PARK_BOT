@@ -542,7 +542,8 @@ class _VehicleCard extends StatelessWidget {
                                         textDirection: TextDirection.ltr,
                                         child: Text(
                                           '${overdue ? remaining.abs() : remaining} KM',
-                                          style: AppText.caption.copyWith(
+                                          style: AppText.numeric.copyWith(
+                                            fontSize: 12,
                                             color: overdue ? colors.pending : colors.textSecondary,
                                             fontWeight: overdue ? FontWeight.w700 : FontWeight.w500,
                                           ),

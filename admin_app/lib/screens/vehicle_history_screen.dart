@@ -327,7 +327,7 @@ class _VehicleHistoryScreenState extends State<VehicleHistoryScreen> {
                               textDirection: TextDirection.ltr,
                               child: Text(
                                 km == null ? '— KM' : '$km KM',
-                                style: AppText.section.copyWith(fontSize: 16),
+                                style: AppText.numeric.copyWith(fontSize: 16, color: AppColors.of(context).textPrimary),
                               ),
                             ),
                             if (index == 0) const StatusChip(status: 'normal', label: 'الأحدث', icon: Icons.new_releases_outlined),
@@ -652,15 +652,43 @@ class _VehicleHistoryScreenState extends State<VehicleHistoryScreen> {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text(
-                              title,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: AppText.label.copyWith(
-                                fontSize: 14,
-                                color: colors.textPrimary,
+                            if (isReading && km != null)
+                              RichText(
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                text: TextSpan(
+                                  style: AppText.label.copyWith(
+                                    fontSize: 14,
+                                    color: colors.textPrimary,
+                                  ),
+                                  children: [
+                                    const TextSpan(text: 'قراءة عداد • '),
+                                    WidgetSpan(
+                                      alignment: PlaceholderAlignment.middle,
+                                      child: Directionality(
+                                        textDirection: TextDirection.ltr,
+                                        child: Text(
+                                          '$km KM',
+                                          style: AppText.numeric.copyWith(
+                                            fontSize: 14,
+                                            color: colors.textPrimary,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              )
+                            else
+                              Text(
+                                title,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: AppText.label.copyWith(
+                                  fontSize: 14,
+                                  color: colors.textPrimary,
+                                ),
                               ),
-                            ),
                             const SizedBox(height: AppSpacing.xs),
                             Directionality(
                               textDirection: TextDirection.ltr,
@@ -1182,7 +1210,7 @@ class _VehicleSummary extends StatelessWidget {
                         textDirection: TextDirection.ltr,
                         child: Text(
                           '$km KM',
-                          style: AppText.title.copyWith(color: colors.textPrimary),
+                          style: AppText.numeric.copyWith(fontSize: 22, color: colors.textPrimary),
                         ),
                       ),
                     if (readingCount > 0 && date != null && date.isNotEmpty)

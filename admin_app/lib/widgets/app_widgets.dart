@@ -352,7 +352,7 @@ class SummaryTile extends StatelessWidget {
               children: [
                 Icon(icon, color: color, size: 19),
                 const SizedBox(height: AppSpacing.sm),
-                Text(value, style: AppText.title.copyWith(color: colors.textPrimary)),
+                Text(value, style: AppText.numeric.copyWith(fontSize: 22, color: colors.textPrimary)),
                 const SizedBox(height: 2),
                 Text(
                   label,
