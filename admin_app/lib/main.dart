@@ -45,9 +45,7 @@ class _AuthGateState extends State<AuthGate> {
     _session = Api.instance.hasToken();
   }
 
-  void _retry() {
-    setState(() => _session = Api.instance.hasToken());
-  }
+  void _retry() => setState(() => _session = Api.instance.hasToken());
 
   @override
   Widget build(BuildContext context) {
@@ -76,7 +74,7 @@ class _AppSplash extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colors = Theme.of(context).extension<dynamic>();
+    final theme = Theme.of(context);
     return Scaffold(
       body: Center(
         child: Column(
@@ -86,22 +84,22 @@ class _AppSplash extends StatelessWidget {
               width: 68,
               height: 68,
               decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.primary,
+                color: theme.colorScheme.primary,
                 borderRadius: BorderRadius.circular(22),
               ),
-              child: const Icon(
+              child: Icon(
                 Icons.local_shipping_rounded,
-                color: Colors.white,
+                color: theme.colorScheme.onPrimary,
                 size: 34,
               ),
             ),
             const SizedBox(height: 18),
             Text(
               'AFAKDECO PARK',
-              style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                    fontWeight: FontWeight.w800,
-                    letterSpacing: .1,
-                  ),
+              style: theme.textTheme.titleLarge?.copyWith(
+                fontWeight: FontWeight.w800,
+                letterSpacing: .1,
+              ),
             ),
             const SizedBox(height: 8),
             const SizedBox(

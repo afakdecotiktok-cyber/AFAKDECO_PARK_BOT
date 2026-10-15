@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../l10n/strings.dart';
+import '../services/api.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_text.dart';
@@ -49,7 +50,6 @@ class SectionHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = AppColors.of(context);
     return Row(
-      crossAxisAlignment: CrossAxisAlignment.center,
       children: [
         Expanded(
           child: Column(
@@ -58,10 +58,7 @@ class SectionHeader extends StatelessWidget {
               Text(title, style: Theme.of(context).textTheme.titleMedium),
               if (subtitle != null) ...[
                 const SizedBox(height: AppSpacing.xs),
-                Text(
-                  subtitle!,
-                  style: AppText.caption.copyWith(color: colors.textSecondary),
-                ),
+                Text(subtitle!, style: AppText.caption.copyWith(color: colors.textSecondary)),
               ],
             ],
           ),
@@ -91,11 +88,7 @@ class PrimaryButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final child = loading
-        ? const SizedBox(
-            height: 18,
-            width: 18,
-            child: CircularProgressIndicator(strokeWidth: 2),
-          )
+        ? const SizedBox(height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2))
         : Row(
             mainAxisSize: MainAxisSize.min,
             mainAxisAlignment: MainAxisAlignment.center,
@@ -109,10 +102,7 @@ class PrimaryButton extends StatelessWidget {
           );
     return SizedBox(
       width: expand ? double.infinity : null,
-      child: FilledButton(
-        onPressed: loading ? null : onPressed,
-        child: child,
-      ),
+      child: FilledButton(onPressed: loading ? null : onPressed, child: child),
     );
   }
 }
@@ -134,22 +124,16 @@ class SecondaryButton extends StatelessWidget {
   final bool expand;
 
   @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      width: expand ? double.infinity : null,
-      child: OutlinedButton.icon(
-        onPressed: loading ? null : onPressed,
-        icon: loading
-            ? const SizedBox(
-                height: 16,
-                width: 16,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              )
-            : Icon(icon ?? Icons.arrow_forward_rounded, size: 18),
-        label: Text(label),
-      ),
-    );
-  }
+  Widget build(BuildContext context) => SizedBox(
+        width: expand ? double.infinity : null,
+        child: OutlinedButton.icon(
+          onPressed: loading ? null : onPressed,
+          icon: loading
+              ? const SizedBox(height: 16, width: 16, child: CircularProgressIndicator(strokeWidth: 2))
+              : Icon(icon ?? Icons.arrow_forward_rounded, size: 18),
+          label: Text(label),
+        ),
+      );
 }
 
 class DestructiveButton extends StatelessWidget {
@@ -178,11 +162,7 @@ class DestructiveButton extends StatelessWidget {
           side: BorderSide(color: colors.pending.withValues(alpha: 0.55)),
         ),
         icon: loading
-            ? const SizedBox(
-                height: 16,
-                width: 16,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              )
+            ? const SizedBox(height: 16, width: 16, child: CircularProgressIndicator(strokeWidth: 2))
             : const Icon(Icons.delete_outline_rounded, size: 18),
         label: Text(label),
       ),
@@ -228,14 +208,11 @@ class AppTextField extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final inputFormatters = digitsOnly
-        ? <TextInputFormatter>[FilteringTextInputFormatter.digitsOnly]
-        : null;
     return TextFormField(
       controller: controller,
       enabled: enabled,
       keyboardType: keyboardType ?? (digitsOnly ? TextInputType.number : null),
-      inputFormatters: inputFormatters,
+      inputFormatters: digitsOnly ? [FilteringTextInputFormatter.digitsOnly] : null,
       maxLines: maxLines,
       textInputAction: textInputAction,
       autofillHints: autofillHints,
@@ -245,8 +222,7 @@ class AppTextField extends StatelessWidget {
       decoration: InputDecoration(
         labelText: labelText,
         hintText: hintText,
-        prefixIcon: prefixIcon ??
-            (search ? const Icon(Icons.search_rounded) : null),
+        prefixIcon: prefixIcon ?? (search ? const Icon(Icons.search_rounded) : null),
         suffixIcon: suffixIcon ??
             (search && controller.text.isNotEmpty
                 ? IconButton(
@@ -280,8 +256,7 @@ class StatusChip extends StatelessWidget {
     final colors = AppColors.of(context);
     final key = _statusKey(status);
     final color = colors.statusColor(key);
-    final text = label ?? _statusLabel(status);
-    final glyph = icon ?? _statusIcon(key);
+    final text = label ?? _statusLabel(status, key);
     return Semantics(
       label: 'الحالة: $text',
       child: Tooltip(
@@ -296,15 +271,9 @@ class StatusChip extends StatelessWidget {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(glyph, size: 14, color: color),
+              Icon(icon ?? _statusIcon(key), size: 14, color: color),
               const SizedBox(width: 5),
-              Text(
-                text,
-                style: AppText.caption.copyWith(
-                  color: color,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
+              Text(text, style: AppText.caption.copyWith(color: color, fontWeight: FontWeight.w700)),
             ],
           ),
         ),
@@ -319,27 +288,27 @@ String _statusKey(String value) {
   if (normal == 'in_progress' || normal == 'قيد التصليح') return 'in_progress';
   if (normal == 'accident' || normal == 'حادث') return 'accident';
   if (normal == 'vidange') return 'vidange';
-  if (normal == 'تم الإصلاح' || normal == 'fixed' || normal == 'normal' || normal == 'سليمة') return 'normal';
+  if (normal == 'تم الإصلاح' || normal == 'fixed') return 'fixed';
+  if (normal == 'normal' || normal == 'سليمة') return 'normal';
   return 'other';
 }
 
-String _statusLabel(String value) {
-  return switch (_statusKey(value)) {
-    'pending' => AppStrings.waiting,
-    'in_progress' => AppStrings.inProgress,
-    'accident' => AppStrings.accident,
-    'vidange' => AppStrings.vidange,
-    'normal' => value == 'سليمة' ? 'سليمة' : AppStrings.fixed,
-    _ => value.isEmpty ? 'غير محدد' : value,
-  };
-}
+String _statusLabel(String value, String key) => switch (key) {
+      'pending' => AppStrings.waiting,
+      'in_progress' => AppStrings.inProgress,
+      'accident' => AppStrings.accident,
+      'vidange' => AppStrings.vidange,
+      'fixed' => AppStrings.fixed,
+      'normal' => 'سليمة',
+      _ => value.isEmpty ? 'غير محدد' : value,
+    };
 
 IconData _statusIcon(String key) => switch (key) {
       'pending' => Icons.hourglass_top_rounded,
       'in_progress' => Icons.build_circle_rounded,
       'accident' => Icons.warning_rounded,
       'vidange' => Icons.handyman_rounded,
-      'normal' => Icons.check_circle_rounded,
+      'fixed' || 'normal' => Icons.check_circle_rounded,
       _ => Icons.info_outline_rounded,
     };
 
@@ -364,9 +333,7 @@ class SummaryTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = AppColors.of(context);
-    final color = statusKey == 'primary'
-        ? colors.primary
-        : colors.statusColor(statusKey);
+    final color = statusKey == 'primary' ? colors.primary : colors.statusColor(statusKey);
     return SizedBox(
       width: 112,
       child: Material(
@@ -379,9 +346,7 @@ class SummaryTile extends StatelessWidget {
             padding: const EdgeInsets.all(AppSpacing.md),
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(AppSpacing.cardRadius),
-              border: Border.all(
-                color: selected ? color.withValues(alpha: 0.55) : colors.border,
-              ),
+              border: Border.all(color: selected ? color.withValues(alpha: 0.55) : colors.border),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -433,21 +398,14 @@ class EmptyState extends StatelessWidget {
             Container(
               width: 58,
               height: 58,
-              decoration: BoxDecoration(
-                color: colors.surfaceAlt,
-                borderRadius: BorderRadius.circular(18),
-              ),
+              decoration: BoxDecoration(color: colors.surfaceAlt, borderRadius: BorderRadius.circular(18)),
               child: Icon(icon, size: 28, color: colors.textSecondary),
             ),
             const SizedBox(height: AppSpacing.md),
             Text(title, textAlign: TextAlign.center, style: AppText.section),
             if (description != null) ...[
               const SizedBox(height: AppSpacing.xs),
-              Text(
-                description!,
-                textAlign: TextAlign.center,
-                style: AppText.body.copyWith(color: colors.textSecondary),
-              ),
+              Text(description!, textAlign: TextAlign.center, style: AppText.body.copyWith(color: colors.textSecondary)),
             ],
             if (actionLabel != null && onAction != null) ...[
               const SizedBox(height: AppSpacing.lg),
@@ -461,11 +419,7 @@ class EmptyState extends StatelessWidget {
 }
 
 class ErrorState extends StatelessWidget {
-  const ErrorState({
-    super.key,
-    required this.message,
-    required this.onRetry,
-  });
+  const ErrorState({super.key, required this.message, required this.onRetry});
 
   final String message;
   final VoidCallback onRetry;
@@ -519,14 +473,7 @@ class LoadingSkeletonList extends StatelessWidget {
         padding: const EdgeInsets.all(AppSpacing.md),
         child: Row(
           children: [
-            Container(
-              width: 44,
-              height: 44,
-              decoration: BoxDecoration(
-                color: colors.border,
-                borderRadius: BorderRadius.circular(14),
-              ),
-            ),
+            Container(width: 44, height: 44, decoration: BoxDecoration(color: colors.border, borderRadius: BorderRadius.circular(14))),
             const SizedBox(width: AppSpacing.md),
             Expanded(
               child: Column(
@@ -547,21 +494,19 @@ class LoadingSkeletonList extends StatelessWidget {
 }
 
 abstract final class AppSnackbar {
-  static void success(BuildContext context, String message) =>
-      _show(context, message, Icons.check_circle_outline_rounded);
-  static void error(BuildContext context, String message) =>
-      _show(context, message, Icons.error_outline_rounded);
-  static void info(BuildContext context, String message) =>
-      _show(context, message, Icons.info_outline_rounded);
+  static void success(BuildContext context, String message) => _show(context, message, Icons.check_circle_outline_rounded);
+  static void error(BuildContext context, String message) => _show(context, message, Icons.error_outline_rounded);
+  static void info(BuildContext context, String message) => _show(context, message, Icons.info_outline_rounded);
 
   static void _show(BuildContext context, String message, IconData icon) {
+    final foreground = Theme.of(context).snackBarTheme.contentTextStyle?.color;
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(
         SnackBar(
           content: Row(
             children: [
-              Icon(icon, size: 19, color: Theme.of(context).snackBarTheme.contentTextStyle?.color),
+              Icon(icon, size: 19, color: foreground),
               const SizedBox(width: AppSpacing.sm),
               Expanded(child: Text(message)),
             ],
@@ -586,17 +531,10 @@ abstract final class ConfirmDialog {
           title: Text(title),
           content: Text(message),
           actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: Text(cancelLabel),
-            ),
+            TextButton(onPressed: () => Navigator.pop(context, false), child: Text(cancelLabel)),
             FilledButton(
               onPressed: () => Navigator.pop(context, true),
-              style: destructive
-                  ? FilledButton.styleFrom(
-                      backgroundColor: AppColors.of(context).pending,
-                    )
-                  : null,
+              style: destructive ? FilledButton.styleFrom(backgroundColor: AppColors.of(context).pending) : null,
               child: Text(confirmLabel),
             ),
           ],
@@ -617,9 +555,7 @@ abstract final class AppBottomSheet {
         showDragHandle: true,
         backgroundColor: AppColors.of(context).surface,
         shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(
-            top: Radius.circular(AppSpacing.sheetRadius),
-          ),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(AppSpacing.sheetRadius)),
         ),
         builder: builder,
       );
