@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:cross_file/cross_file.dart';
 import 'package:share_plus/share_plus.dart';
+import '../l10n/strings.dart';
 import '../services/api.dart';
 import '../theme/app_colors.dart';
 
@@ -36,7 +37,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       await action();
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(success)));
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر تنفيذ العملية: $e')));
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر تنفيذ العملية: ${friendlyError(e)}')));
     } finally {
       if (mounted) setState(() => busy = false);
     }
@@ -372,7 +373,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
       );
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر جلب بيانات Vidange: $e')));
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر جلب بيانات Vidange: ${friendlyError(e)}')));
     } finally {
       if (mounted) setState(() => busy = false);
     }
@@ -429,7 +430,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
       );
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر جلب المشرفين: $e')));
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر جلب المشرفين: ${friendlyError(e)}')));
     } finally {
       if (mounted) setState(() => busy = false);
     }

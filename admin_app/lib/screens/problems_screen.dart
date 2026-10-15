@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../l10n/strings.dart';
 import '../services/api.dart';
 import '../theme/app_colors.dart';
 import '../widgets/status_icons.dart';
@@ -41,7 +42,7 @@ class _ProblemsScreenState extends State<ProblemsScreen> {
       );
       error = null;
     } catch (e) {
-      error = e.toString();
+      error = friendlyError(e);
     }
     if (mounted) setState(() => loading = false);
   }
@@ -271,7 +272,7 @@ class _ProblemsScreenState extends State<ProblemsScreen> {
                         await load();
                         if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم حفظ التعليق')));
                       } catch (e) {
-                        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر حفظ التعليق: $e')));
+                        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر حفظ التعليق: ${friendlyError(e)}')));
                       }
                     },
                     icon: const Icon(Icons.comment_outlined),
@@ -285,7 +286,7 @@ class _ProblemsScreenState extends State<ProblemsScreen> {
                           if (sheetContext.mounted) Navigator.pop(sheetContext);
                           await load();
                         } catch (e) {
-                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر التحويل: $e')));
+                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر التحويل: ${friendlyError(e)}')));
                         }
                       },
                       icon: Icon(Icons.warning_amber_rounded, color: AppColors.of(context).accident),
@@ -303,7 +304,7 @@ class _ProblemsScreenState extends State<ProblemsScreen> {
                             SnackBar(content: Text(nextStatus == 'قيد التصليح' ? 'تم نقل الشكوى إلى قيد المعالجة' : 'تمت إعادة الشكوى إلى قيد الانتظار')),
                           );
                         } catch (e) {
-                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر تحديث الحالة: $e')));
+                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر تحديث الحالة: ${friendlyError(e)}')));
                         }
                       },
                       icon: Icon(p['status'] == 'قيد التصليح' ? Icons.undo : Icons.build_outlined),
@@ -318,7 +319,7 @@ class _ProblemsScreenState extends State<ProblemsScreen> {
                           await load();
                           if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم تسجيل الإصلاح')));
                         } catch (e) {
-                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر تسجيل الإصلاح: $e')));
+                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر تسجيل الإصلاح: ${friendlyError(e)}')));
                         }
                       },
                       icon: const Icon(Icons.check_circle_outline),
@@ -351,7 +352,7 @@ class _ProblemsScreenState extends State<ProblemsScreen> {
                           await load();
                           if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم حذف الشكوى')));
                         } catch (e) {
-                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر حذف الشكوى: $e')));
+                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر حذف الشكوى: ${friendlyError(e)}')));
                         }
                       },
                       icon: const Icon(Icons.delete_outline),

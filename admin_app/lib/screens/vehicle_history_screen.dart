@@ -330,17 +330,23 @@ class _VehicleHistoryScreenState extends State<VehicleHistoryScreen> {
                                 style: AppText.numeric.copyWith(fontSize: 16, color: AppColors.of(context).textPrimary),
                               ),
                             ),
-                            if (index == 0) const StatusChip(status: 'normal', label: 'الأحدث', icon: Icons.new_releases_outlined),
+                            if (index == 0) const StatusChip(status: 'latest', label: 'الأحدث', icon: Icons.new_releases_outlined),
                           ],
                         ),
                         const SizedBox(height: AppSpacing.xs),
-                        Directionality(
-                          textDirection: TextDirection.ltr,
-                          child: Text(
-                            (reading['date'] ?? 'تاريخ غير متاح').toString(),
+                        if ((reading['date'] ?? '').toString().trim().isEmpty)
+                          Text(
+                            'تاريخ غير متاح',
                             style: AppText.caption.copyWith(color: AppColors.of(context).textSecondary),
+                          )
+                        else
+                          Directionality(
+                            textDirection: TextDirection.ltr,
+                            child: Text(
+                              reading['date'].toString(),
+                              style: AppText.caption.copyWith(color: AppColors.of(context).textSecondary),
+                            ),
                           ),
-                        ),
                         if ((reading['driver_name'] ?? '').toString().trim().isNotEmpty)
                           Text(
                             'السائق: ${reading['driver_name']}',
@@ -550,10 +556,19 @@ class _VehicleHistoryScreenState extends State<VehicleHistoryScreen> {
                   ),
                 ),
                 const SizedBox(width: AppSpacing.sm),
-                Text(
-                  group,
-                  style: AppText.label.copyWith(color: colors.textSecondary),
-                ),
+                if (group == 'تاريخ غير متاح')
+                  Text(
+                    group,
+                    style: AppText.label.copyWith(color: colors.textSecondary),
+                  )
+                else
+                  Directionality(
+                    textDirection: TextDirection.ltr,
+                    child: Text(
+                      group,
+                      style: AppText.label.copyWith(color: colors.textSecondary),
+                    ),
+                  ),
               ],
             ),
           ),
@@ -690,15 +705,19 @@ class _VehicleHistoryScreenState extends State<VehicleHistoryScreen> {
                                 ),
                               ),
                             const SizedBox(height: AppSpacing.xs),
-                            Directionality(
-                              textDirection: TextDirection.ltr,
-                              child: Text(
-                                rawDate.isEmpty ? 'تاريخ غير متاح' : rawDate,
-                                style: AppText.caption.copyWith(
-                                  color: colors.textSecondary,
+                            if (rawDate.isEmpty)
+                              Text(
+                                'تاريخ غير متاح',
+                                style: AppText.caption.copyWith(color: colors.textSecondary),
+                              )
+                            else
+                              Directionality(
+                                textDirection: TextDirection.ltr,
+                                child: Text(
+                                  rawDate,
+                                  style: AppText.caption.copyWith(color: colors.textSecondary),
                                 ),
                               ),
-                            ),
                             if (isReading &&
                                 (data['driver_name'] ?? '').toString().trim().isNotEmpty)
                               Text(
