@@ -1,7 +1,13 @@
 import 'package:flutter/material.dart';
-import 'package:cross_file/cross_file.dart';
 import 'package:share_plus/share_plus.dart';
+import '../l10n/strings.dart';
 import '../services/api.dart';
+import '../services/app_data_events.dart';
+import '../theme/app_spacing.dart';
+import '../theme/app_text.dart';
+import '../widgets/app_widgets.dart';
+import 'vidange_screen.dart';
+import '../theme/app_colors.dart';
 
 class SettingsScreen extends StatefulWidget {
   final Future<void> Function() onLogout;
@@ -35,7 +41,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       await action();
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(success)));
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر تنفيذ العملية: $e')));
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر تنفيذ العملية: ${friendlyError(e)}')));
     } finally {
       if (mounted) setState(() => busy = false);
     }
@@ -64,187 +70,223 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Directionality(
-      textDirection: TextDirection.rtl,
+    final colors = AppColors.of(context);
+    final rawName = (profile?['display_name'] ?? '').toString().trim();
+    final displayName = rawName.isEmpty ? 'الملف الشخصي' : rawName;
+    final role = (profile?['role'] ?? '—').toString();
+    final userId = (profile?['user_id'] ?? '—').toString();
+
+    return RefreshIndicator(
+      onRefresh: _loadProfile,
       child: ListView(
-        padding: const EdgeInsets.all(12),
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.lg, AppSpacing.lg, AppSpacing.xxl),
         children: [
-          const Text('الإعدادات والإدارة', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
-          const SizedBox(height: 4),
-          const Text('تُنفّذ العمليات الإدارية عبر واجهة الخادم الحالية وتخضع لصلاحيات الحساب.', style: TextStyle(color: Colors.grey)),
-          const SizedBox(height: 12),
-          Card(
-            child: ListTile(
-              leading: const CircleAvatar(child: Icon(Icons.person_outline)),
-              title: Text((profile?['display_name'] ?? '').toString().trim().isEmpty
-                  ? 'الملف الشخصي'
-                  : profile!['display_name'].toString()),
-              subtitle: Text(profile == null
-                  ? 'جارٍ تحميل بيانات الحساب...'
-                  : 'Telegram ID: ${profile!['user_id'] ?? '—'} • الصلاحية: ${profile!['role'] ?? '—'}'),
-              trailing: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  IconButton(
-                    tooltip: 'تعديل الاسم الظاهر',
-                    onPressed: busy ? null : _editProfile,
-                    icon: const Icon(Icons.edit_outlined),
+          Text(
+            'الإعدادات والإدارة',
+            style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w800, color: colors.textPrimary),
+          ),
+          const SizedBox(height: AppSpacing.xs),
+          Text(
+            'إدارة الحساب والمركبات والتقارير والصيانة من مكان واحد.',
+            style: AppText.body.copyWith(color: colors.textSecondary),
+          ),
+          if (busy) ...[
+            const SizedBox(height: AppSpacing.md),
+            const LinearProgressIndicator(minHeight: 2),
+          ],
+          const SizedBox(height: AppSpacing.lg),
+          AppCard(
+            padding: const EdgeInsets.all(AppSpacing.lg),
+            child: Row(
+              children: [
+                Container(
+                  width: 54,
+                  height: 54,
+                  decoration: BoxDecoration(color: colors.tint(colors.primary), borderRadius: BorderRadius.circular(18)),
+                  child: Icon(Icons.person_rounded, color: colors.primary, size: 29),
+                ),
+                const SizedBox(width: AppSpacing.md),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(displayName, maxLines: 1, overflow: TextOverflow.ellipsis, style: AppText.section.copyWith(color: colors.textPrimary)),
+                      const SizedBox(height: AppSpacing.xs),
+                      Text(profile == null ? 'بيانات الحساب غير متوفرة بعد' : 'Telegram ID: $userId', style: AppText.caption.copyWith(color: colors.textSecondary)),
+                      const SizedBox(height: AppSpacing.xs),
+                      Container(
+                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.xs),
+                decoration: BoxDecoration(
+                  color: colors.surfaceAlt,
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: Text(
+                  role == 'super_admin' ? 'المشرف الأعلى' : role == 'admin' ? 'مشرف' : role,
+                  style: AppText.caption.copyWith(
+                    color: colors.textSecondary,
+                    fontWeight: FontWeight.w700,
                   ),
-                  IconButton(
-                    tooltip: 'تحديث بيانات الحساب',
-                    onPressed: _loadProfile,
-                    icon: const Icon(Icons.refresh),
-                  ),
-                ],
+                ),
               ),
-            ),
-          ),
-          Card(
-            child: Column(
-              children: [
-                const ListTile(
-                  leading: Icon(Icons.telegram),
-                  title: Text('تكامل Telegram'),
-                  subtitle: Text('يبقى البوت والمجموعة المصدر الأساسي للتواصل والوسائط.'),
+                    ],
+                  ),
                 ),
-                const Divider(height: 1),
-                const ListTile(
-                  leading: Icon(Icons.security),
-                  title: Text('الأمان'),
-                  subtitle: Text('رمز البوت ومعلومات قاعدة البيانات لا تُخزّن داخل التطبيق.'),
-                ),
+                IconButton(tooltip: 'تعديل الاسم الظاهر', onPressed: busy ? null : _editProfile, icon: const Icon(Icons.edit_outlined)),
+                IconButton(tooltip: 'تحديث الحساب', onPressed: busy ? null : _loadProfile, icon: const Icon(Icons.refresh_rounded)),
               ],
             ),
           ),
-          const SizedBox(height: 8),
-          Card(
-            child: Column(
-              children: [
-                const ListTile(leading: Icon(Icons.directions_car), title: Text('إدارة المركبات'), subtitle: Text('إضافة مركبة أو حذفها (للمشرف الأعلى فقط).')),
-                ListTile(
-                  leading: const Icon(Icons.add_circle_outline),
-                  title: const Text('إضافة مركبة'),
-                  trailing: const Icon(Icons.chevron_left),
-                  onTap: busy ? null : () async {
-                    final code = await _ask('إضافة مركبة', 'رمز المركبة، مثل H01');
-                    if (code == null || code.trim().isEmpty || !mounted) return;
-                    await _run(() => Api.instance.addVehicle(code), 'تم إرسال طلب إضافة المركبة');
-                  },
-                ),
-                ListTile(
-                  leading: const Icon(Icons.delete_outline, color: Colors.red),
-                  title: const Text('حذف مركبة'),
-                  trailing: const Icon(Icons.chevron_left),
-                  onTap: busy ? null : () async {
-                    final code = await _ask('حذف مركبة', 'رمز المركبة المراد حذفها');
-                    if (code == null || code.trim().isEmpty || !mounted) return;
-                    final ok = await showDialog<bool>(
-                      context: context,
-                      builder: (ctx) => AlertDialog(
-                        title: const Text('تأكيد حذف المركبة'),
-                        content: Text('هل تريد حذف المركبة ${code.toUpperCase()}؟ راجع ارتباطاتها قبل المتابعة.'),
-                        actions: [
-                          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('إلغاء')),
-                          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('تأكيد الحذف')),
-                        ],
-                      ),
-                    );
-                    if (ok == true) await _run(() => Api.instance.removeVehicle(code), 'تم إرسال طلب حذف المركبة');
-                  },
-                ),
-              ],
-            ),
+          const SizedBox(height: AppSpacing.md),
+          _SettingsSection(
+            title: 'الاتصال والأمان',
+            subtitle: 'مصدر البيانات والوسائط وحماية بيانات الدخول.',
+            icon: Icons.shield_outlined,
+            children: [
+              const ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.telegram_rounded),
+                title: Text('تكامل Telegram'),
+                subtitle: Text('تبقى المجموعة ورسائل Telegram المرجع الأصلي للشكاوى والوسائط.'),
+              ),
+              const Divider(height: AppSpacing.lg),
+              const ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.lock_outline_rounded),
+                title: Text('حماية بيانات الدخول'),
+                subtitle: Text('لا تُضمّن مفاتيح البوت أو معلومات قاعدة البيانات داخل التطبيق.'),
+              ),
+            ],
           ),
-          const SizedBox(height: 8),
-          Card(
-            child: Column(
-              children: [
-                const ListTile(leading: Icon(Icons.admin_panel_settings), title: Text('إدارة المشرفين'), subtitle: Text('إضافة مشرف جديد باستخدام Telegram User ID.')),
-                ListTile(
-                  leading: const Icon(Icons.person_add_alt_1),
-                  title: const Text('إضافة مشرف'),
-                  trailing: const Icon(Icons.chevron_left),
-                  onTap: busy ? null : () async {
-                    final uid = await _ask('إضافة مشرف', 'Telegram User ID');
-                    if (uid == null || uid.isEmpty || !mounted) return;
-                    await _run(() => Api.instance.addAdmin(uid), 'تم إرسال طلب إضافة المشرف');
-                  },
-                ),
-                ListTile(
-                  leading: const Icon(Icons.people_outline),
-                  title: const Text('عرض المشرفين الحاليين'),
-                  trailing: const Icon(Icons.chevron_left),
-                  onTap: busy ? null : _showAdmins,
-                ),
-              ],
-            ),
+          const SizedBox(height: AppSpacing.md),
+          _SettingsSection(
+            title: 'إدارة المركبات',
+            subtitle: 'إضافة المركبات أو حذفها وفق صلاحيات الحساب.',
+            icon: Icons.directions_car_filled_outlined,
+            children: [
+              _SettingsActionTile(
+                icon: Icons.add_circle_outline_rounded,
+                title: 'إضافة مركبة',
+                subtitle: 'تسجيل مركبة جديدة في النظام',
+                onTap: busy ? null : () async {
+                  final code = await _ask('إضافة مركبة', 'رمز المركبة، مثل H01');
+                  if (code == null || code.trim().isEmpty || !mounted) return;
+                  await _run(() => Api.instance.addVehicle(code), 'تم إرسال طلب إضافة المركبة');
+                },
+              ),
+              _SettingsActionTile(
+                icon: Icons.delete_outline_rounded,
+                title: 'حذف مركبة',
+                subtitle: 'إزالة مركبة بعد مراجعة ارتباطاتها',
+                color: colors.pending,
+                onTap: busy ? null : () async {
+                  final code = await _ask('حذف مركبة', 'رمز المركبة المراد حذفها');
+                  if (code == null || code.trim().isEmpty || !mounted) return;
+                  final ok = await ConfirmDialog.show(
+                    context,
+                    title: 'تأكيد حذف المركبة',
+                    message: 'هل تريد حذف المركبة ${code.toUpperCase()}؟ راجع ارتباطاتها قبل المتابعة.',
+                    confirmLabel: 'تأكيد الحذف',
+                    destructive: true,
+                  );
+                  if (ok == true && mounted) {
+                    await _run(() => Api.instance.removeVehicle(code), 'تم إرسال طلب حذف المركبة');
+                  }
+                },
+              ),
+            ],
           ),
-          const SizedBox(height: 8),
-          Card(
-            child: Column(
-              children: [
-                const ListTile(
-                  leading: Icon(Icons.file_download_outlined),
-                  title: Text('التقارير والتصحيح'),
-                  subtitle: Text('تصدير ملفات Excel وتصحيح آخر قراءة عداد عند إدخالها بالخطأ.'),
-                ),
-                ListTile(
-                  leading: const Icon(Icons.table_view_outlined),
-                  title: const Text('تصدير جميع الشكاوى إلى Excel'),
-                  trailing: const Icon(Icons.chevron_left),
-                  onTap: busy ? null : () => _shareExport('/api/export/problems', 'reclamations.xlsx', 'تم تجهيز ملف الشكاوى للمشاركة'),
-                ),
-                ListTile(
-                  leading: const Icon(Icons.local_gas_station_outlined),
-                  title: const Text('تصدير تقرير Vidange إلى Excel'),
-                  trailing: const Icon(Icons.chevron_left),
-                  onTap: busy ? null : () => _shareExport('/api/export/vidange', 'vidange.xlsx', 'تم تجهيز ملف Vidange للمشاركة'),
-                ),
-                ListTile(
-                  leading: const Icon(Icons.directions_car_filled_outlined),
-                  title: const Text('تصدير Vidange لمركبة محددة'),
-                  trailing: const Icon(Icons.chevron_left),
-                  onTap: busy ? null : _shareVehicleVidange,
-                ),
-                ListTile(
-                  leading: const Icon(Icons.edit_note),
-                  title: const Text('تصحيح آخر قراءة عداد (fixkm)'),
-                  trailing: const Icon(Icons.chevron_left),
-                  onTap: busy ? null : _fixLatestKm,
-                ),
-              ],
-            ),
+          const SizedBox(height: AppSpacing.md),
+          _SettingsSection(
+            title: 'إدارة المشرفين',
+            subtitle: 'تعديل قائمة المشرفين باستخدام Telegram User ID.',
+            icon: Icons.admin_panel_settings_outlined,
+            children: [
+              _SettingsActionTile(
+                icon: Icons.person_add_alt_1_rounded,
+                title: 'إضافة مشرف',
+                subtitle: 'إرسال طلب إضافة مشرف',
+                onTap: busy ? null : () async {
+                  final uid = await _ask('إضافة مشرف', 'Telegram User ID');
+                  if (uid == null || uid.isEmpty || !mounted) return;
+                  await _run(() => Api.instance.addAdmin(uid), 'تم إرسال طلب إضافة المشرف');
+                },
+              ),
+              _SettingsActionTile(
+                icon: Icons.people_alt_outlined,
+                title: 'عرض المشرفين الحاليين',
+                subtitle: 'عرض الأدوار وإدارة القائمة',
+                onTap: busy ? null : _showAdmins,
+              ),
+            ],
           ),
-          const SizedBox(height: 8),
-          Card(
-            child: Column(
-              children: [
-                const ListTile(leading: Icon(Icons.build_circle_outlined), title: Text('صيانة البيانات'), subtitle: Text('تحديث القيم يتم عبر صفحات السجلات المخصصة.')),
-                const ListTile(leading: Icon(Icons.speed), title: Text('Vidange والكيلومترات'), subtitle: Text('عرض القيم المسجلة وتعديل قيمة Vidange للمركبة.')),
-                ListTile(
-                  leading: const Icon(Icons.list_alt),
-                  title: const Text('عرض حالة Vidange لكل المركبات'),
-                  trailing: const Icon(Icons.chevron_left),
-                  onTap: busy ? null : _showVidange,
-                ),
-                ListTile(
-                  leading: const Icon(Icons.cached),
-                  title: const Text('مسح التخزين المؤقت'),
-                  subtitle: const Text('حذف النسخ المحلية المؤقتة وإعادة تحميل البيانات عند الطلب.'),
-                  trailing: const Icon(Icons.chevron_left),
-                  onTap: busy ? null : () => _run(Api.instance.clearApiCache, 'تم مسح التخزين المؤقت'),
-                ),
-                const ListTile(leading: Icon(Icons.archive_outlined), title: Text('الأرشفة'), subtitle: Text('تُعرض مراجع الوسائط القديمة لفتحها من رسالة Telegram الأصلية.')),
-              ],
-            ),
+          const SizedBox(height: AppSpacing.md),
+          _SettingsSection(
+            title: 'Vidange والكيلومترات',
+            subtitle: 'متابعة الصيانة ومواعيدها وتصحيح قراءات العداد.',
+            icon: Icons.handyman_outlined,
+            children: [
+              _SettingsActionTile(
+                icon: Icons.local_gas_station_outlined,
+                title: 'لوحة متابعة Vidange',
+                subtitle: 'عرض كل المركبات والموعد القادم ومقدار التجاوز',
+                onTap: busy ? null : _showVidange,
+              ),
+              _SettingsActionTile(
+                icon: Icons.edit_road_outlined,
+                title: 'تصحيح آخر قراءة عداد',
+                subtitle: 'تصحيح آخر قيمة مسجلة باستخدام fixkm',
+                onTap: busy ? null : _fixLatestKm,
+              ),
+              _SettingsActionTile(
+                icon: Icons.cached_rounded,
+                title: 'مسح التخزين المؤقت',
+                subtitle: 'إزالة النسخ المحلية وإعادة تحميل البيانات',
+                onTap: busy ? null : () => _run(() async {
+                  await Api.instance.clearApiCache();
+                  AppDataEvents.notifyChanged();
+                }, 'تم مسح التخزين المؤقت وإعادة تحميل البيانات'),
+              ),
+            ],
           ),
-          const SizedBox(height: 18),
+          const SizedBox(height: AppSpacing.md),
+          _SettingsSection(
+            title: 'التقارير والأرشفة',
+            subtitle: 'تصدير ملفات Excel والرجوع إلى الوسائط الأصلية في Telegram.',
+            icon: Icons.file_present_outlined,
+            children: [
+              _SettingsActionTile(
+                icon: Icons.table_view_outlined,
+                title: 'تصدير جميع الشكاوى',
+                subtitle: 'إنشاء ملف Excel للمشاركة',
+                onTap: busy ? null : () => _shareExport('/api/export/problems', 'reclamations.xlsx', 'تم تجهيز ملف الشكاوى للمشاركة'),
+              ),
+              _SettingsActionTile(
+                icon: Icons.local_gas_station_outlined,
+                title: 'تصدير تقرير Vidange',
+                subtitle: 'تقرير صيانة لجميع المركبات',
+                onTap: busy ? null : () => _shareExport('/api/export/vidange', 'vidange.xlsx', 'تم تجهيز تقرير Vidange للمشاركة'),
+              ),
+              _SettingsActionTile(
+                icon: Icons.directions_car_outlined,
+                title: 'تصدير Vidange لمركبة محددة',
+                subtitle: 'اختيار رمز المركبة ثم مشاركة التقرير',
+                onTap: busy ? null : _shareVehicleVidange,
+              ),
+              const ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.archive_outlined),
+                title: Text('الوسائط المؤرشفة'),
+                subtitle: Text('تبقى الوسائط القديمة قابلة للوصول من رسالة Telegram الأصلية.'),
+              ),
+            ],
+          ),
+          const SizedBox(height: AppSpacing.lg),
           OutlinedButton.icon(
             onPressed: busy ? null : widget.onLogout,
-            icon: const Icon(Icons.logout),
+            icon: const Icon(Icons.logout_rounded),
             label: const Text('تسجيل الخروج'),
           ),
-          if (busy) const Padding(padding: EdgeInsets.all(12), child: Center(child: CircularProgressIndicator())),
         ],
       ),
     );
@@ -313,74 +355,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _showVidange() async {
-    setState(() => busy = true);
-    try {
-      final rows = await Api.instance.vidange();
-      if (!mounted) return;
-      await showModalBottomSheet<void>(
-        context: context,
-        isScrollControlled: true,
-        showDragHandle: true,
-        builder: (sheetContext) => Directionality(
-          textDirection: TextDirection.rtl,
-          child: SafeArea(
-            child: ListView(
-              shrinkWrap: true,
-              padding: const EdgeInsets.all(16),
-              children: [
-                const Text('حالة Vidange للمركبات', style: TextStyle(fontSize: 19, fontWeight: FontWeight.w800)),
-                const SizedBox(height: 10),
-                if (rows.isEmpty) const Text('لا توجد بيانات.'),
-                ...rows.map((raw) {
-                  final v = Map<String, dynamic>.from(raw);
-                  final remaining = v['remaining_km'];
-                  return ListTile(
-                    leading: const Icon(Icons.directions_car_outlined),
-                    title: Text((v['vehicle'] ?? '—').toString()),
-                    subtitle: Text('آخر Vidange: ${v['last_vidange_km'] ?? 'غير مسجل'} KM • آخر قراءة: ${v['latest_km'] ?? 'غير متوفرة'} KM\nالمتبقي: ${remaining ?? 'غير متوفر'} KM'),
-                    isThreeLine: true,
-                    trailing: IconButton(
-                      tooltip: 'تعديل القيمة',
-                      icon: const Icon(Icons.edit),
-                      onPressed: () async {
-                        final controller = TextEditingController(text: v['last_vidange_km']?.toString() ?? '');
-                        final value = await showDialog<String>(
-                          context: sheetContext,
-                          builder: (dialogContext) => AlertDialog(
-                            title: Text('تعديل Vidange • ${v['vehicle']}'),
-                            content: TextField(
-                              controller: controller,
-                              keyboardType: TextInputType.number,
-                              decoration: const InputDecoration(labelText: 'قيمة آخر Vidange (KM)', border: OutlineInputBorder()),
-                            ),
-                            actions: [
-                              TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('إلغاء')),
-                              FilledButton(onPressed: () => Navigator.pop(dialogContext, controller.text.trim()), child: const Text('حفظ')),
-                            ],
-                          ),
-                        );
-                        controller.dispose();
-                        final km = int.tryParse(value ?? '');
-                        if (km == null || km < 0) {
-                          if (mounted && value != null) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('أدخل قيمة كيلومترات صحيحة')));
-                          return;
-                        }
-                        await _run(() async { await Api.instance.setVidange(v['vehicle'].toString(), km); }, 'تم حفظ قيمة Vidange');
-                        if (sheetContext.mounted) Navigator.pop(sheetContext);
-                      },
-                    ),
-                  );
-                }),
-              ],
-            ),
-          ),
-        ),
-      );
-    } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر جلب بيانات Vidange: $e')));
-    } finally {
-      if (mounted) setState(() => busy = false);
-    }
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => const VidangeOverviewScreen(),
+      ),
+    );
   }
 
   Future<void> _showAdmins() async {
@@ -391,9 +370,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       await showModalBottomSheet<void>(
         context: context,
         showDragHandle: true,
-        builder: (ctx) => Directionality(
-          textDirection: TextDirection.rtl,
-          child: SafeArea(
+        builder: (ctx) => SafeArea(
             child: ListView(
               shrinkWrap: true,
               padding: const EdgeInsets.all(16),
@@ -410,7 +387,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     subtitle: Text('ID: $id • ${a['role'] ?? 'admin'}'),
                     trailing: IconButton(
                       tooltip: 'حذف المشرف',
-                      icon: const Icon(Icons.delete_outline, color: Colors.red),
+                      icon: Icon(Icons.delete_outline, color: AppColors.of(ctx).pending),
                       onPressed: id.isEmpty ? null : () async {
                         final ok = await showDialog<bool>(
                           context: ctx,
@@ -434,12 +411,88 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ],
             ),
           ),
-        ),
       );
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر جلب المشرفين: $e')));
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر جلب المشرفين: ${friendlyError(e)}')));
     } finally {
       if (mounted) setState(() => busy = false);
     }
+  }
+}
+
+class _SettingsSection extends StatelessWidget {
+  const _SettingsSection({
+    required this.title,
+    required this.subtitle,
+    required this.icon,
+    required this.children,
+  });
+
+  final String title;
+  final String subtitle;
+  final IconData icon;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
+    return AppCard(
+      padding: const EdgeInsets.all(AppSpacing.lg),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(color: colors.tint(colors.primary), borderRadius: BorderRadius.circular(12)),
+                child: Icon(icon, color: colors.primary, size: 20),
+              ),
+              const SizedBox(width: AppSpacing.md),
+              Expanded(child: SectionHeader(title: title, subtitle: subtitle)),
+            ],
+          ),
+          const SizedBox(height: AppSpacing.md),
+          ...children,
+        ],
+      ),
+    );
+  }
+}
+
+class _SettingsActionTile extends StatelessWidget {
+  const _SettingsActionTile({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.onTap,
+    this.color,
+  });
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final VoidCallback? onTap;
+  final Color? color;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
+    final tint = color ?? colors.primary;
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      enabled: onTap != null,
+      onTap: onTap,
+      leading: Container(
+        width: 42,
+        height: 42,
+        decoration: BoxDecoration(color: colors.tint(tint), borderRadius: BorderRadius.circular(13)),
+        child: Icon(icon, color: tint, size: 21),
+      ),
+      title: Text(title, style: AppText.label.copyWith(fontSize: 14)),
+      subtitle: Text(subtitle, style: AppText.caption.copyWith(color: colors.textSecondary)),
+      trailing: Icon(Icons.chevron_left_rounded, color: colors.textSecondary),
+    );
   }
 }

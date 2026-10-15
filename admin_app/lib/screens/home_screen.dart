@@ -1,193 +1,138 @@
 import 'package:flutter/material.dart';
+
+import '../l10n/strings.dart';
 import '../services/api.dart';
-import '../widgets/status_icons.dart';
-import 'problems_screen.dart';
+import '../theme/app_colors.dart';
+import '../theme/app_spacing.dart';
+import '../widgets/app_widgets.dart';
+import 'dashboard_screen.dart';
 import 'drivers_screen.dart';
-import 'vehicle_history_screen.dart';
-import 'settings_screen.dart';
 import 'login_screen.dart';
+import 'problems_screen.dart';
+import 'settings_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
+
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  int tab = 0;
-  bool loading = true;
-  String? error;
-  List<dynamic> vehicles = [];
-  final search = TextEditingController();
+  final _dashboardKey = GlobalKey<DashboardScreenState>();
+  int _tab = 0;
+  bool _refreshing = false;
 
-  @override
-  void initState() {
-    super.initState();
-    load();
-  }
-
-  @override
-  void dispose() {
-    search.dispose();
-    super.dispose();
-  }
-
-  Future<void> load() async {
-    setState(() => loading = true);
+  Future<void> _refreshDashboard() async {
+    if (_refreshing) return;
+    setState(() => _refreshing = true);
     try {
-      vehicles = await Api.instance.dashboard();
-      error = null;
-    } catch (e) {
-      error = e.toString();
+      await _dashboardKey.currentState?.refreshFromShell();
+    } finally {
+      if (mounted) setState(() => _refreshing = false);
     }
-    if (mounted) setState(() => loading = false);
   }
 
-  Future<void> logout() async {
-    await Api.instance.logout();
-    if (mounted) {
+  Future<void> _logout() async {
+    try {
+      await Api.instance.logout();
+      if (!mounted) return;
       Navigator.pushAndRemoveUntil(
         context,
-        MaterialPageRoute(builder: (_) => const LoginScreen()),
+        MaterialPageRoute<void>(builder: (_) => const LoginScreen()),
         (_) => false,
       );
+    } catch (error) {
+      if (mounted) AppSnackbar.error(context, friendlyError(error));
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final pages = [
-      _Dash(
-        vehicles: vehicles,
-        loading: loading,
-        error: error,
-        search: search,
-        reload: load,
-        onSearchChanged: () => setState(() {}),
-        onVehicle: (v) => Navigator.push(
-          context,
-          MaterialPageRoute(builder: (_) => VehicleHistoryScreen(vehicle: v)),
-        ),
-      ),
+    final colors = AppColors.of(context);
+    final pages = <Widget>[
+      DashboardScreen(key: _dashboardKey),
       const ProblemsScreen(),
       const DriversScreen(),
-      SettingsScreen(onLogout: logout),
+      SettingsScreen(onLogout: _logout),
     ];
-    return Directionality(
-      textDirection: TextDirection.rtl,
-      child: Scaffold(
-        appBar: AppBar(
-          title: const Text('AFAKDECO PARK'),
-          actions: [
-            IconButton(onPressed: load, tooltip: 'تحديث البيانات', icon: const Icon(Icons.refresh)),
+
+    return Scaffold(
+      appBar: AppBar(
+        titleSpacing: AppSpacing.lg,
+        title: Row(
+          children: [
+            Container(
+              width: 38,
+              height: 38,
+              decoration: BoxDecoration(
+                color: colors.primary,
+                borderRadius: BorderRadius.circular(13),
+              ),
+              child: Icon(
+                Icons.local_shipping_rounded,
+                color: Theme.of(context).colorScheme.onPrimary,
+                size: 21,
+              ),
+            ),
+            const SizedBox(width: AppSpacing.sm + 3),
+            const Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(AppStrings.appName),
+                  Text(
+                    'لوحة الإدارة',
+                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.w500),
+                  ),
+                ],
+              ),
+            ),
           ],
         ),
-        body: pages[tab],
-        bottomNavigationBar: NavigationBar(
-          selectedIndex: tab,
-          onDestinationSelected: (i) => setState(() => tab = i),
-          destinations: const [
-            NavigationDestination(icon: Icon(Icons.dashboard_outlined), label: 'الرئيسية'),
-            NavigationDestination(icon: Icon(Icons.report_problem_outlined), label: 'الشكاوى'),
-            NavigationDestination(icon: Icon(Icons.people_outline), label: 'السائقون'),
-            NavigationDestination(icon: Icon(Icons.settings_outlined), label: 'الإعدادات'),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _Dash extends StatelessWidget {
-  final List<dynamic> vehicles;
-  final bool loading;
-  final String? error;
-  final TextEditingController search;
-  final Future<void> Function() reload;
-  final VoidCallback onSearchChanged;
-  final void Function(String) onVehicle;
-
-  const _Dash({
-    required this.vehicles,
-    required this.loading,
-    required this.error,
-    required this.search,
-    required this.reload,
-    required this.onSearchChanged,
-    required this.onVehicle,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    if (loading) return const Center(child: CircularProgressIndicator());
-    if (error != null) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [Text(error!), const SizedBox(height: 10), FilledButton(onPressed: reload, child: const Text('إعادة المحاولة'))],
-        ),
-      );
-    }
-    final query = search.text.trim().toLowerCase();
-    final filtered = vehicles.where((raw) {
-      final v = Map<String, dynamic>.from(raw);
-      final drivers = List<dynamic>.from(v['drivers'] ?? []);
-      final haystack = '${v['vehicle'] ?? ''} ${drivers.map((d) => (d as Map)['name'] ?? '').join(' ')}'.toLowerCase();
-      return haystack.contains(query);
-    }).toList();
-
-    return RefreshIndicator(
-      onRefresh: reload,
-      child: ListView(
-        padding: const EdgeInsets.all(12),
-        children: [
-          const Text('لوحة المركبات', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
-          const SizedBox(height: 4),
-          Text('${filtered.length} من ${vehicles.length} مركبة', style: const TextStyle(color: Colors.grey)),
-          const SizedBox(height: 10),
-          TextField(
-            controller: search,
-            onChanged: (_) => onSearchChanged(),
-            decoration: InputDecoration(
-              prefixIcon: const Icon(Icons.search),
-              hintText: 'ابحث برقم المركبة أو اسم السائق',
-              suffixIcon: search.text.isEmpty ? null : IconButton(onPressed: () { search.clear(); onSearchChanged(); }, icon: const Icon(Icons.close)),
-              border: const OutlineInputBorder(),
-              isDense: true,
+        actions: [
+          Padding(
+            padding: const EdgeInsetsDirectional.only(end: AppSpacing.sm),
+            child: IconButton(
+              tooltip: 'تحديث البيانات',
+              onPressed: _refreshing ? null : _refreshDashboard,
+              icon: _refreshing
+                  ? const SizedBox(
+                      height: 20,
+                      width: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.refresh_rounded),
             ),
           ),
-          const SizedBox(height: 8),
-          if (filtered.isEmpty)
-            const Padding(padding: EdgeInsets.all(28), child: Center(child: Text('لا توجد مركبات مطابقة'))),
-          ...filtered.map((raw) {
-            final v = Map<String, dynamic>.from(raw);
-            final drivers = List<dynamic>.from(v['drivers'] ?? []);
-            final remaining = v['remaining_km'];
-            final int? remainingKm = remaining is num ? remaining.toInt() : int.tryParse('$remaining');
-            final bool overdue = remainingKm != null && remainingKm < 0;
-            return Card(
-              margin: const EdgeInsets.only(bottom: 5),
-              child: ListTile(
-                dense: true,
-                visualDensity: const VisualDensity(vertical: -1),
-                leading: const Icon(Icons.directions_car_outlined, size: 27),
-                title: Text(v['vehicle'].toString(), style: const TextStyle(fontWeight: FontWeight.w800)),
-                subtitle: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(drivers.isEmpty ? 'بدون سائق حالي' : drivers.map((d) => (d as Map)['name'] ?? '').join(' • '), maxLines: 1, overflow: TextOverflow.ellipsis),
-                    if (remainingKm != null)
-                      Text(
-                        overdue ? 'تجاوز موعد Vidange بـ ${remainingKm.abs()} KM' : 'المتبقي لـ Vidange: $remainingKm KM',
-                        style: TextStyle(color: overdue ? Colors.red : Colors.grey.shade700, fontSize: 12, fontWeight: overdue ? FontWeight.w700 : FontWeight.normal),
-                      ),
-                  ],
-                ),
-                trailing: StatusIcons(icons: List<dynamic>.from(v['status_icons'] ?? ['normal'])),
-                onTap: () => onVehicle(v['vehicle'].toString()),
-              ),
-            );
-          }),
+        ],
+      ),
+      body: IndexedStack(index: _tab, children: pages),
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: _tab,
+        onDestinationSelected: (index) => setState(() => _tab = index),
+        destinations: const [
+          NavigationDestination(
+            icon: Icon(Icons.grid_view_outlined),
+            selectedIcon: Icon(Icons.grid_view_rounded),
+            label: AppStrings.dashboard,
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.assignment_outlined),
+            selectedIcon: Icon(Icons.assignment_rounded),
+            label: AppStrings.problems,
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.people_alt_outlined),
+            selectedIcon: Icon(Icons.people_alt_rounded),
+            label: AppStrings.drivers,
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.tune_outlined),
+            selectedIcon: Icon(Icons.tune_rounded),
+            label: AppStrings.settings,
+          ),
         ],
       ),
     );

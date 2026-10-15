@@ -5,6 +5,8 @@ import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'app_data_events.dart';
+
 class ApiRequestException implements Exception {
   final int statusCode;
   final String message;
@@ -190,7 +192,10 @@ class Api {
       final message = data is Map ? (data['error'] ?? 'حدث خطأ').toString() : 'حدث خطأ';
       throw ApiRequestException(response.statusCode, message);
     }
-    if (method != 'GET') await clearApiCache();
+    if (method != 'GET') {
+      await clearApiCache();
+      AppDataEvents.notifyChanged();
+    }
     return data;
   }
 
@@ -236,8 +241,14 @@ class Api {
   Future<void> fixProblem(int id) async =>
       request('POST', '/api/problems/$id/fix');
 
+  Future<void> setProblemStatus(int id, String status) async =>
+      request('POST', '/api/problems/$id/status', body: {'status': status});
+
   Future<void> commentProblem(int id, String comment) async =>
       request('POST', '/api/problems/$id/comment', body: {'text': comment});
+
+  Future<void> deleteProblem(int id) async =>
+      request('DELETE', '/api/problems/$id');
 
   Future<void> convertAccident(int id) async =>
       request('POST', '/api/problems/$id/accident');
