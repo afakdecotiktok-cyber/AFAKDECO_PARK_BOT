@@ -446,13 +446,16 @@ class _VehicleHistoryScreenState extends State<VehicleHistoryScreen> {
       child: Row(
         children: [
           Expanded(child: Text(label, style: AppText.body.copyWith(color: colors.textSecondary))),
-          Directionality(
-            textDirection: TextDirection.ltr,
-            child: Text(
-              value == null ? 'غير متوفر' : '$value KM',
-              style: AppText.numeric.copyWith(fontSize: 15, color: colors.textPrimary),
+          if (value == null)
+            Text('غير متوفر', style: AppText.body.copyWith(color: colors.textSecondary))
+          else
+            Directionality(
+              textDirection: TextDirection.ltr,
+              child: Text(
+                '$value KM',
+                style: AppText.numeric.copyWith(fontSize: 15, color: colors.textPrimary),
+              ),
             ),
-          ),
         ],
       ),
     );
@@ -891,11 +894,13 @@ class _VehicleSummary extends StatelessWidget {
                     const SizedBox(height: AppSpacing.xs),
                     if (readingCount == 0)
                       Text(AppStrings.noReadings, style: AppText.body.copyWith(color: colors.textSecondary))
+                    else if (km == null)
+                      Text('تعذر قراءة قيمة الكيلومترات.', style: AppText.body.copyWith(color: colors.textSecondary))
                     else
                       Directionality(
                         textDirection: TextDirection.ltr,
                         child: Text(
-                          km == null ? 'قيمة غير صالحة' : '$km KM',
+                          '$km KM',
                           style: AppText.title.copyWith(color: colors.textPrimary),
                         ),
                       ),
