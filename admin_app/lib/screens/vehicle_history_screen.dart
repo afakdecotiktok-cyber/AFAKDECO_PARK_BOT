@@ -1,183 +1,501 @@
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
+
+import '../l10n/strings.dart';
 import '../services/api.dart';
+import '../theme/app_colors.dart';
+import '../theme/app_spacing.dart';
+import '../theme/app_text.dart';
+import '../widgets/app_widgets.dart';
+import '../widgets/status_icons.dart';
+
+DateTime? _readingDate(Map<String, dynamic> reading) {
+  final raw = reading['date'];
+  if (raw == null) return null;
+  return DateTime.tryParse(raw.toString().trim());
+}
+
+List<Map<String, dynamic>> sortReadingsNewestFirst(List<dynamic> readings) {
+  final indexed = <({Map<String, dynamic> item, DateTime? date, int index})>[];
+  for (var index = 0; index < readings.length; index++) {
+    final raw = readings[index];
+    if (raw is! Map) continue;
+    final item = Map<String, dynamic>.from(raw);
+    indexed.add((item: item, date: _readingDate(item), index: index));
+  }
+  indexed.sort((a, b) {
+    if (a.date == null && b.date != null) return 1;
+    if (a.date != null && b.date == null) return -1;
+    if (a.date != null && b.date != null) {
+      final byDate = b.date!.compareTo(a.date!);
+      if (byDate != 0) return byDate;
+    }
+    return a.index.compareTo(b.index);
+  });
+  return indexed.map((entry) => entry.item).toList();
+}
+
+Map<String, dynamic>? selectLatestReading(List<dynamic> readings) {
+  final sorted = sortReadingsNewestFirst(readings);
+  return sorted.isEmpty ? null : sorted.first;
+}
+
+int? _asInt(dynamic value) {
+  if (value is num) return value.toInt();
+  return int.tryParse(value?.toString().trim() ?? '');
+}
 
 class VehicleHistoryScreen extends StatefulWidget {
   final String vehicle;
-  const VehicleHistoryScreen({super.key, required this.vehicle});
+  final Map<String, dynamic>? vehicleData;
+
+  const VehicleHistoryScreen({
+    super.key,
+    required this.vehicle,
+    this.vehicleData,
+  });
 
   @override
   State<VehicleHistoryScreen> createState() => _VehicleHistoryScreenState();
 }
 
 class _VehicleHistoryScreenState extends State<VehicleHistoryScreen> {
-  bool loading = true;
-  bool savingVidange = false;
-  String? error;
-  Map<String, dynamic>? data;
-  int tab = 0;
+  bool _loading = true;
+  bool _refreshing = false;
+  bool _savingVidange = false;
+  String? _error;
+  Map<String, dynamic>? _data;
+  int _tab = 0;
 
   @override
   void initState() {
     super.initState();
-    load();
+    _load();
   }
 
-  Future<void> load() async {
+  Future<void> _load() async {
+    if (!mounted) return;
+    final hadData = _data != null;
     setState(() {
-      loading = true;
-      error = null;
+      _loading = !hadData;
+      _refreshing = hadData;
+      _error = null;
     });
     try {
-      data = await Api.instance.vehicleHistory(widget.vehicle);
-    } catch (e) {
-      error = e.toString();
+      final result = await Api.instance.vehicleHistory(widget.vehicle);
+      if (!mounted) return;
+      setState(() {
+        _data = result;
+        _error = null;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      final message = friendlyError(error);
+      setState(() => _error = message);
+      if (hadData) AppSnackbar.error(context, message);
+    } finally {
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _refreshing = false;
+        });
+      }
     }
-    if (mounted) setState(() => loading = false);
   }
 
   @override
   Widget build(BuildContext context) {
-    if (loading) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    if (_loading && _data == null) {
+      return const Scaffold(body: LoadingSkeletonList(count: 4));
     }
-    if (error != null) {
+    if (_error != null && _data == null) {
       return Scaffold(
-        appBar: AppBar(title: Text(widget.vehicle)),
-        body: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(error!),
-              const SizedBox(height: 12),
-              FilledButton(onPressed: load, child: const Text('إعادة المحاولة')),
-            ],
-          ),
-        ),
+        appBar: AppBar(title: Text('سجل المركبة')),
+        body: ErrorState(message: _error!, onRetry: _load),
       );
     }
 
-    final problems = List<dynamic>.from(data?['problems'] ?? []);
-    final readings = List<dynamic>.from(data?['readings'] ?? []);
-    final vidange = Map<String, dynamic>.from(data?['vidange'] ?? {});
-    const tabs = ['الكل', 'الشكاوى', 'الحوادث', 'Vidange', 'الكيلومترات'];
+    final data = _data ?? const <String, dynamic>{};
+    final problems = List<dynamic>.from(data['problems'] ?? const []);
+    // The API's actual key is "readings" (not "km_readings").
+    final readings = List<dynamic>.from(data['readings'] ?? const []);
+    final sortedReadings = sortReadingsNewestFirst(readings);
+    final latest = selectLatestReading(readings);
+    final vidange = Map<String, dynamic>.from(data['vidange'] ?? const {});
+    final colors = AppColors.of(context);
 
-    return Directionality(
-      textDirection: TextDirection.rtl,
-      child: Scaffold(
-        appBar: AppBar(
-          title: Text('سجل المركبة • ${widget.vehicle}'),
-          actions: [IconButton(tooltip: 'تحديث', onPressed: load, icon: const Icon(Icons.refresh))],
-        ),
-        body: Column(
-          children: [
-            SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.all(10),
-              child: Row(
-                children: List.generate(
-                  tabs.length,
-                  (i) => Padding(
-                    padding: const EdgeInsetsDirectional.only(end: 6),
-                    child: ChoiceChip(
-                      label: Text(tabs[i]),
-                      selected: tab == i,
-                      onSelected: (_) => setState(() => tab = i),
-                    ),
-                  ),
-                ),
-              ),
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('سجل المركبة'),
+        actions: [
+          IconButton(
+            tooltip: 'تحديث السجل',
+            onPressed: _refreshing ? null : _load,
+            icon: _refreshing
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.refresh_rounded),
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              AppSpacing.lg,
+              AppSpacing.xs,
+              AppSpacing.lg,
+              AppSpacing.md,
             ),
-            Expanded(child: _body(problems, readings, vidange)),
-          ],
-        ),
+            child: _VehicleSummary(
+              vehicle: widget.vehicle,
+              vehicleData: widget.vehicleData,
+              latest: latest,
+              readingCount: readings.length,
+            ),
+          ),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsetsDirectional.fromSTEB(
+              AppSpacing.lg,
+              0,
+              AppSpacing.lg,
+              AppSpacing.md,
+            ),
+            child: Row(
+              children: List.generate(5, (index) {
+                const labels = [
+                  'الكل',
+                  'الشكاوى',
+                  'الحوادث',
+                  AppStrings.vidange,
+                  AppStrings.kilometres,
+                ];
+                return Padding(
+                  padding: const EdgeInsetsDirectional.only(end: AppSpacing.sm),
+                  child: ChoiceChip(
+                    label: Text(labels[index]),
+                    selected: _tab == index,
+                    onSelected: (_) => setState(() => _tab = index),
+                  ),
+                );
+              }),
+            ),
+          ),
+          if (_refreshing) const LinearProgressIndicator(minHeight: 2),
+          if (_error != null && _data != null)
+            Container(
+              width: double.infinity,
+              color: colors.tint(colors.pending),
+              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
+              child: Text(_error!, style: AppText.caption.copyWith(color: colors.pending)),
+            ),
+          Expanded(
+            child: _buildTab(
+              problems: problems,
+              readings: sortedReadings,
+              vidange: vidange,
+            ),
+          ),
+        ],
       ),
     );
   }
 
-  Widget _body(
-    List<dynamic> problems,
-    List<dynamic> readings,
-    Map<String, dynamic> vidange,
-  ) {
-    if (tab == 4) {
-      if (readings.isEmpty) return _empty('لا توجد قراءات كيلومترات مسجلة');
-      return ListView.separated(
-        itemCount: readings.length,
-        separatorBuilder: (_, __) => const Divider(height: 1),
-        itemBuilder: (_, i) {
-          final item = Map<String, dynamic>.from(readings[i]);
-          return ListTile(
-            leading: const CircleAvatar(child: Icon(Icons.speed)),
-            title: Text('${item['km'] ?? '-'} KM'),
-            subtitle: Text((item['date'] ?? '').toString()),
-          );
-        },
+  Widget _buildTab({
+    required List<dynamic> problems,
+    required List<Map<String, dynamic>> readings,
+    required Map<String, dynamic> vidange,
+  }) {
+    if (_tab == 4) {
+      if (readings.isEmpty) {
+        return RefreshIndicator(
+          onRefresh: _load,
+          child: ListView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            children: const [
+              SizedBox(height: 60),
+              EmptyState(
+                title: AppStrings.noReadings,
+                description: 'ستظهر هنا القراءات المسجلة لهذه المركبة.',
+                icon: Icons.speed_rounded,
+              ),
+            ],
+          ),
+        );
+      }
+      return RefreshIndicator(
+        onRefresh: _load,
+        child: ListView.separated(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.fromLTRB(
+            AppSpacing.lg,
+            0,
+            AppSpacing.lg,
+            AppSpacing.xl,
+          ),
+          itemCount: readings.length,
+          separatorBuilder: (_, __) => const SizedBox(height: AppSpacing.sm),
+          itemBuilder: (context, index) {
+            final reading = readings[index];
+            final km = _asInt(reading['km']);
+            final previous = index + 1 < readings.length ? _asInt(readings[index + 1]['km']) : null;
+            final delta = km != null && previous != null ? km - previous : null;
+            return AppCard(
+              padding: const EdgeInsets.all(AppSpacing.md),
+              child: Row(
+                children: [
+                  Container(
+                    width: 42,
+                    height: 42,
+                    decoration: BoxDecoration(
+                      color: AppColors.of(context).surfaceAlt,
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Icon(
+                      Icons.speed_rounded,
+                      color: AppColors.of(context).primary,
+                    ),
+                  ),
+                  const SizedBox(width: AppSpacing.md),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Wrap(
+                          spacing: AppSpacing.sm,
+                          runSpacing: AppSpacing.xs,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            Directionality(
+                              textDirection: TextDirection.ltr,
+                              child: Text(
+                                km == null ? '— KM' : '$km KM',
+                                style: AppText.section.copyWith(fontSize: 16),
+                              ),
+                            ),
+                            if (index == 0) const StatusChip(status: 'normal', label: 'الأحدث', icon: Icons.new_releases_outlined),
+                          ],
+                        ),
+                        const SizedBox(height: AppSpacing.xs),
+                        Directionality(
+                          textDirection: TextDirection.ltr,
+                          child: Text(
+                            (reading['date'] ?? 'تاريخ غير متاح').toString(),
+                            style: AppText.caption.copyWith(color: AppColors.of(context).textSecondary),
+                          ),
+                        ),
+                        if ((reading['driver_name'] ?? '').toString().trim().isNotEmpty)
+                          Text(
+                            'السائق: ${reading['driver_name']}',
+                            style: AppText.caption.copyWith(color: AppColors.of(context).textSecondary),
+                          ),
+                        if (delta != null)
+                          Text(
+                            'الفرق عن القراءة السابقة: ${delta >= 0 ? '+' : ''}$delta KM',
+                            style: AppText.caption.copyWith(color: AppColors.of(context).textSecondary),
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
       );
     }
 
-    if (tab == 3) {
-      return ListView(
-        padding: const EdgeInsets.all(12),
-        children: [
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
+    if (_tab == 3) {
+      return RefreshIndicator(
+        onRefresh: _load,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.xl),
+          children: [
+            AppCard(
+              padding: const EdgeInsets.all(AppSpacing.lg),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('ملخص Vidange', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 12),
+                  const SectionHeader(
+                    title: 'ملخص Vidange',
+                    subtitle: 'مؤشرات الصيانة اعتماداً على بيانات الخادم.',
+                  ),
+                  const SizedBox(height: AppSpacing.md),
                   _metric('آخر قيمة Vidange', vidange['last_vidange_km']),
                   _metric('القيمة القادمة', vidange['next_vidange_km']),
-                  _metric('آخر كيلومترات مسجلة', vidange['latest_km']),
-                  _metric('المتبقي', vidange['remaining_km'], suffix: ' KM'),
-                  const SizedBox(height: 12),
-                  SizedBox(
-                    width: double.infinity,
-                    child: FilledButton.icon(
-                      onPressed: savingVidange ? null : () => _editVidange(vidange),
-                      icon: const Icon(Icons.edit_road),
-                      label: Text(savingVidange ? 'جارٍ الحفظ...' : 'تعديل / تأكيد قيمة Vidange'),
-                    ),
+                  _metric('آخر قراءة كيلومترات', vidange['latest_km']),
+                  _metric('المتبقي', vidange['remaining_km']),
+                  _vidangeProgress(vidange),
+                  const SizedBox(height: AppSpacing.lg),
+                  PrimaryButton(
+                    label: _savingVidange ? 'جارٍ الحفظ…' : 'تعديل / تأكيد قيمة Vidange',
+                    icon: Icons.edit_road_rounded,
+                    loading: _savingVidange,
+                    onPressed: () => _editVidange(vidange),
                   ),
-                  const SizedBox(height: 6),
-                  const Text(
-                    'تعديل هذه القيمة يتطلب صلاحية المشرف الأعلى. سيتم عرض القيمة السابقة والجديدة قبل التأكيد.',
-                    style: TextStyle(fontSize: 12, color: Colors.grey),
+                  const SizedBox(height: AppSpacing.sm),
+                  Text(
+                    'يتطلب تعديل هذه القيمة صلاحية المشرف الأعلى. ستُعرض القيم السابقة والجديدة قبل الحفظ.',
+                    style: AppText.caption.copyWith(color: AppColors.of(context).textSecondary),
                   ),
                 ],
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       );
     }
 
-    final filtered = tab == 2
-        ? problems.where((p) => p['problem_type'] == 'accident').toList()
-        : tab == 1
-            ? problems.where((p) => p['problem_type'] != 'accident' && p['problem_type'] != 'vidange').toList()
+    final filtered = _tab == 2
+        ? problems.where((p) => p is Map && p['problem_type'] == 'accident').toList()
+        : _tab == 1
+            ? problems.where((p) => p is Map && p['problem_type'] != 'accident' && p['problem_type'] != 'vidange' && p['media_type'] != 'نظام').toList()
             : problems;
 
-    if (filtered.isEmpty) return _empty('لا توجد سجلات في هذا القسم');
-    return ListView.separated(
-      itemCount: filtered.length,
-      separatorBuilder: (_, __) => const Divider(height: 1),
-      itemBuilder: (_, i) {
-        final item = Map<String, dynamic>.from(filtered[i]);
-        final accident = item['problem_type'] == 'accident';
-        return ListTile(
-          leading: Icon(
-            accident ? Icons.warning_rounded : Icons.report_problem_outlined,
-            color: accident ? const Color(0xFF7B3FF2) : null,
+    if (filtered.isEmpty) {
+      return RefreshIndicator(
+        onRefresh: _load,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          children: const [
+            SizedBox(height: 56),
+            EmptyState(
+              title: 'لا توجد سجلات في هذا القسم',
+              description: 'يمكنك السحب إلى الأسفل لتحديث السجل.',
+              icon: Icons.history_rounded,
+            ),
+          ],
+        ),
+      );
+    }
+    return RefreshIndicator(
+      onRefresh: _load,
+      child: ListView.separated(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.xl),
+        itemCount: filtered.length,
+        separatorBuilder: (_, __) => const SizedBox(height: AppSpacing.sm),
+        itemBuilder: (context, index) {
+          final item = Map<String, dynamic>.from(filtered[index] as Map);
+          final accident = item['problem_type'] == 'accident';
+          final fixed = item['ruglee'] == 'تم الإصلاح';
+          final status = accident
+              ? AppStrings.accident
+              : fixed
+                  ? AppStrings.fixed
+                  : (item['status'] ?? AppStrings.waiting).toString();
+          final colors = AppColors.of(context);
+          return AppCard(
+            padding: const EdgeInsets.all(AppSpacing.md),
+            onTap: () => _showProblemActions(item),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  width: 42,
+                  height: 42,
+                  decoration: BoxDecoration(
+                    color: colors.tint(colors.statusColor(accident ? 'accident' : status)),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Icon(
+                    accident ? Icons.warning_rounded : Icons.assignment_outlined,
+                    color: colors.statusColor(accident ? 'accident' : status),
+                  ),
+                ),
+                const SizedBox(width: AppSpacing.md),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        (item['problem_text'] ?? 'سجل بدون وصف').toString(),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: AppText.label.copyWith(fontSize: 14),
+                      ),
+                      const SizedBox(height: AppSpacing.xs),
+                      Text(
+                        (item['date'] ?? '').toString(),
+                        style: AppText.caption.copyWith(color: colors.textSecondary),
+                      ),
+                      const SizedBox(height: AppSpacing.sm),
+                      StatusChip(status: status),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: AppSpacing.xs),
+                Icon(Icons.chevron_left_rounded, color: colors.textSecondary),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _metric(String label, dynamic value) {
+    final colors = AppColors.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
+      child: Row(
+        children: [
+          Expanded(child: Text(label, style: AppText.body.copyWith(color: colors.textSecondary))),
+          Directionality(
+            textDirection: TextDirection.ltr,
+            child: Text(
+              value == null ? 'غير متوفر' : '$value KM',
+              style: AppText.numeric.copyWith(fontSize: 15, color: colors.textPrimary),
+            ),
           ),
-          title: Text((item['problem_text'] ?? 'سجل بدون وصف').toString(), maxLines: 2, overflow: TextOverflow.ellipsis),
-          subtitle: Text('${item['date'] ?? ''} • ${item['ruglee'] == 'تم الإصلاح' ? 'تم الإصلاح' : item['status'] ?? ''}'),
-          isThreeLine: false,
-          onTap: () => _showProblemActions(item),
-        );
-      },
+        ],
+      ),
+    );
+  }
+
+  Widget _vidangeProgress(Map<String, dynamic> vidange) {
+    final last = _asInt(vidange['last_vidange_km']);
+    final latest = _asInt(vidange['latest_km']);
+    final next = _asInt(vidange['next_vidange_km']);
+    if (last == null || latest == null || next == null || next <= last) {
+      return const SizedBox.shrink();
+    }
+    final fraction = ((latest - last) / (next - last)).clamp(0.0, 1.0).toDouble();
+    final remaining = _asInt(vidange['remaining_km']);
+    final colors = AppColors.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(top: AppSpacing.md),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(child: Text('استهلاك دورة Vidange', style: AppText.label)),
+              Text(
+                '${(fraction * 100).round()}%',
+                style: AppText.caption.copyWith(
+                  color: remaining != null && remaining < 0 ? colors.pending : colors.textSecondary,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: AppSpacing.sm),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(999),
+            child: LinearProgressIndicator(
+              value: fraction,
+              minHeight: 7,
+              color: remaining != null && remaining < 0 ? colors.pending : colors.vidange,
+              backgroundColor: colors.surfaceAlt,
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -185,265 +503,422 @@ class _VehicleHistoryScreenState extends State<VehicleHistoryScreen> {
     final id = int.tryParse(item['id']?.toString() ?? '');
     if (id == null) return;
     final comment = TextEditingController(text: (item['comments'] ?? '').toString());
-    final media = List<dynamic>.from(item['media'] ?? []);
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
-      builder: (sheetContext) => Directionality(
-        textDirection: TextDirection.rtl,
-        child: SafeArea(
-          child: Padding(
-            padding: EdgeInsets.fromLTRB(
-              16, 8, 16, MediaQuery.of(sheetContext).viewInsets.bottom + 16,
+    final media = List<dynamic>.from(item['media'] ?? const []);
+    var working = false;
+
+    await AppBottomSheet.show<void>(
+      context,
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (context, setSheetState) {
+          Future<void> perform(
+            Future<void> Function() action,
+            String successMessage,
+          ) async {
+            if (working) return;
+            setSheetState(() => working = true);
+            try {
+              await action();
+              if (!sheetContext.mounted) return;
+              Navigator.pop(sheetContext);
+              await _load();
+              if (mounted) AppSnackbar.success(this.context, successMessage);
+            } catch (error) {
+              if (mounted) AppSnackbar.error(this.context, friendlyError(error));
+            } finally {
+              if (sheetContext.mounted) setSheetState(() => working = false);
+            }
+          }
+
+          final fixed = item['ruglee'] == 'تم الإصلاح'];
+          final status = (item['status'] ?? AppStrings.waiting).toString();
+          final isAccident = item['problem_type'] == 'accident';
+          final isVidangeSystem = item['media_type'] == 'نظام' || item['problem_type'] == 'vidange';
+          return Padding(
+            padding: EdgeInsetsDirectional.fromSTEB(
+              AppSpacing.lg,
+              AppSpacing.sm,
+              AppSpacing.lg,
+              MediaQuery.viewInsetsOf(sheetContext).bottom + AppSpacing.xl,
             ),
-            child: SingleChildScrollView(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text('الشكوى #$id', style: Theme.of(sheetContext).textTheme.titleLarge),
-                  const SizedBox(height: 8),
-                  Text((item['problem_text'] ?? 'لا يوجد وصف').toString()),
-                  const SizedBox(height: 6),
-                  Text('الحالة: ${item['ruglee'] == 'تم الإصلاح' ? 'تم الإصلاح' : item['status'] ?? '—'}'),
-                  if (media.isNotEmpty) ...[
-                    const SizedBox(height: 10),
-                    const Text('الوسائط', style: TextStyle(fontWeight: FontWeight.bold)),
-                    ...media.map((raw) {
-                      final m = Map<String, dynamic>.from(raw);
-                      final mediaId = int.tryParse(m['id']?.toString() ?? '');
-                      final url = (m['telegram_url'] ?? '').toString();
-                      return ListTile(
-                        contentPadding: EdgeInsets.zero,
-                        leading: m['available_in_app'] == true && mediaId != null && m['media_type'] == 'صورة'
-                            ? FutureBuilder<Map<String, String>>(
-                                future: Api.instance.mediaHeaders(),
-                                builder: (context, snapshot) => snapshot.hasData
-                                    ? Image.network(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.sizeOf(context).height * 0.82,
+              ),
+              child: SingleChildScrollView(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      isAccident ? 'تفاصيل الحادث #$id' : 'تفاصيل السجل #$id',
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
+                    const SizedBox(height: AppSpacing.sm),
+                    Text((item['problem_text'] ?? 'لا يوجد وصف').toString()),
+                    const SizedBox(height: AppSpacing.sm),
+                    Wrap(
+                      spacing: AppSpacing.sm,
+                      runSpacing: AppSpacing.sm,
+                      children: [
+                        StatusChip(status: isAccident ? AppStrings.accident : fixed ? AppStrings.fixed : status),
+                        if (isVidangeSystem) const StatusChip(status: 'vidange'),
+                      ],
+                    ),
+                    const SizedBox(height: AppSpacing.md),
+                    if (media.isNotEmpty) ...[
+                      const SectionHeader(title: 'الوسائط المرفقة'),
+                      const SizedBox(height: AppSpacing.sm),
+                      ...media.map((raw) {
+                        final m = Map<String, dynamic>.from(raw as Map);
+                        final mediaId = int.tryParse(m['id']?.toString() ?? '');
+                        final url = (m['telegram_url'] ?? '').toString();
+                        return ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          leading: m['available_in_app'] == true && mediaId != null && m['media_type'] == 'صورة'
+                              ? FutureBuilder<Map<String, String>>(
+                                  future: Api.instance.mediaHeaders(),
+                                  builder: (context, snapshot) {
+                                    if (!snapshot.hasData) {
+                                      return const SizedBox(
+                                        width: 52,
+                                        height: 52,
+                                        child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+                                      );
+                                    }
+                                    return ClipRRect(
+                                      borderRadius: BorderRadius.circular(10),
+                                      child: Image.network(
                                         Api.instance.mediaUrl(id, mediaId),
                                         headers: snapshot.data,
-                                        width: 56,
-                                        height: 56,
+                                        width: 52,
+                                        height: 52,
                                         fit: BoxFit.cover,
                                         errorBuilder: (_, __, ___) => const Icon(Icons.broken_image_outlined),
-                                      )
-                                    : const SizedBox(width: 56, height: 56, child: Center(child: CircularProgressIndicator(strokeWidth: 2))),
-                              )
-                            : Icon(m['media_type'] == 'فيديو' ? Icons.videocam : Icons.photo),
-                        title: Text('الوسائط • ${m['media_type'] ?? 'Telegram'}'),
-                        subtitle: Text((m['media_type'] ?? 'وسائط').toString()),
-                        trailing: IconButton(
-                          icon: const Icon(Icons.open_in_new),
-                          onPressed: url.isEmpty ? null : () async {
-                            final uri = Uri.tryParse(url);
-                            if (uri != null) await launchUrl(uri, mode: LaunchMode.externalApplication);
-                          },
-                        ),
-                      );
-                    }),
-                  ],
-                  const SizedBox(height: 10),
-                  TextField(
-                    controller: comment,
-                    minLines: 1,
-                    maxLines: 3,
-                    decoration: const InputDecoration(
-                      labelText: 'تعليق الإصلاح',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  FilledButton.icon(
-                    onPressed: () async {
-                      if (comment.text.trim().isEmpty) {
-                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('اكتب تعليقاً أولاً')));
-                        return;
-                      }
-                      try {
-                        await Api.instance.commentProblem(id, comment.text.trim());
-                        if (sheetContext.mounted) Navigator.pop(sheetContext);
-                        await load();
-                        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم حفظ التعليق')));
-                      } catch (e) {
-                        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر حفظ التعليق: $e')));
-                      }
-                    },
-                    icon: const Icon(Icons.comment_outlined),
-                    label: const Text('حفظ التعليق'),
-                  ),
-                  if (item['problem_type'] != 'accident')
-                    OutlinedButton.icon(
-                      onPressed: () async {
-                        try {
-                          await Api.instance.convertAccident(id);
-                          if (sheetContext.mounted) Navigator.pop(sheetContext);
-                          await load();
-                        } catch (e) {
-                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر التحويل إلى حادث: $e')));
-                        }
-                      },
-                      icon: const Icon(Icons.warning_amber_rounded, color: Color(0xFF7B3FF2)),
-                      label: const Text('تحويل إلى حادث'),
-                    ),
-                  if (item['ruglee'] != 'تم الإصلاح')
-                    OutlinedButton.icon(
-                      onPressed: () async {
-                        final nextStatus = item['status'] == 'قيد التصليح' ? 'قيد الانتظار' : 'قيد التصليح';
-                        try {
-                          await Api.instance.setProblemStatus(id, nextStatus);
-                          if (sheetContext.mounted) Navigator.pop(sheetContext);
-                          await load();
-                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(content: Text(nextStatus == 'قيد التصليح' ? 'تم نقل الشكوى إلى قيد المعالجة' : 'تمت إعادة الشكوى إلى قيد الانتظار')),
-                          );
-                        } catch (e) {
-                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر تحديث الحالة: $e')));
-                        }
-                      },
-                      icon: Icon(item['status'] == 'قيد التصليح' ? Icons.undo : Icons.build_outlined),
-                      label: Text(item['status'] == 'قيد التصليح' ? 'إعادة إلى En attente' : 'En cours de traitement'),
-                    ),
-                  if (item['ruglee'] != 'تم الإصلاح' && item['status'] == 'قيد التصليح')
-                    OutlinedButton.icon(
-                      onPressed: () async {
-                        try {
-                          await Api.instance.fixProblem(id);
-                          if (sheetContext.mounted) Navigator.pop(sheetContext);
-                          await load();
-                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم تسجيل الإصلاح')));
-                        } catch (e) {
-                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر تسجيل الإصلاح: $e')));
-                        }
-                      },
-                      icon: const Icon(Icons.check_circle_outline),
-                      label: const Text('Mark as fixed / تم الإصلاح'),
-                    ),
-                  if (item['ruglee'] == 'تم الإصلاح')
-                    const ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      leading: Icon(Icons.check_circle, color: Colors.green),
-                      title: Text('تم الإصلاح'),
-                    ),
-                  OutlinedButton.icon(
-                      style: OutlinedButton.styleFrom(foregroundColor: const Color(0xFFDC4545)),
-                      onPressed: () async {
-                        final confirmed = await showDialog<bool>(
-                          context: sheetContext,
-                          builder: (dialogContext) => AlertDialog(
-                            title: const Text('حذف الشكوى؟'),
-                            content: const Text('سيتم حذف هذا السجل من قاعدة البيانات.'),
-                            actions: [
-                              TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('إلغاء')),
-                              FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('حذف')),
-                            ],
+                                      ),
+                                    );
+                                  },
+                                )
+                              : Icon(m['media_type'] == 'فيديو' ? Icons.videocam_outlined : Icons.photo_outlined),
+                          title: Text((m['media_type'] ?? 'وسائط Telegram').toString()),
+                          subtitle: Text(
+                            m['available_in_app'] == true ? 'متاحة مؤقتاً داخل التطبيق' : 'افتح الرسالة الأصلية في Telegram',
+                            style: AppText.caption.copyWith(color: AppColors.of(context).textSecondary),
+                          ),
+                          trailing: IconButton(
+                            tooltip: 'فتح في Telegram',
+                            icon: const Icon(Icons.open_in_new_rounded),
+                            onPressed: url.isEmpty || working
+                                ? null
+                                : () async {
+                                    final uri = Uri.tryParse(url);
+                                    if (uri == null) {
+                                      AppSnackbar.error(this.context, 'رابط Telegram غير صالح.');
+                                      return;
+                                    }
+                                    try {
+                                      final opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
+                                      if (!opened && mounted) {
+                                        AppSnackbar.error(this.context, 'تعذر فتح رابط Telegram.');
+                                      }
+                                    } catch (_) {
+                                      if (mounted) AppSnackbar.error(this.context, 'تعذر فتح رابط Telegram.');
+                                    }
+                                  },
                           ),
                         );
-                        if (confirmed != true) return;
-                        try {
-                          await Api.instance.deleteProblem(id);
-                          if (sheetContext.mounted) Navigator.pop(sheetContext);
-                          await load();
-                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم حذف الشكوى')));
-                        } catch (e) {
-                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر حذف الشكوى: $e')));
-                        }
-                      },
-                      icon: const Icon(Icons.delete_outline),
-                      label: const Text('Delete / حذف'),
+                      }),
+                      const SizedBox(height: AppSpacing.sm),
+                    ],
+                    AppTextField(
+                      controller: comment,
+                      labelText: 'تعليق الإصلاح',
+                      hintText: 'اكتب تعليقاً أو توضيحاً',
+                      maxLines: 3,
+                      enabled: !working,
                     ),
-                ],
+                    const SizedBox(height: AppSpacing.md),
+                    PrimaryButton(
+                      label: 'حفظ التعليق',
+                      icon: Icons.comment_outlined,
+                      loading: working,
+                      onPressed: () async {
+                        if (comment.text.trim().isEmpty) {
+                          AppSnackbar.info(this.context, 'اكتب تعليقاً أولاً.');
+                          return;
+                        }
+                        await perform(
+                          () => Api.instance.commentProblem(id, comment.text.trim()),
+                          'تم حفظ التعليق.',
+                        );
+                      },
+                    ),
+                    if (!isAccident && !isVidangeSystem) ...[
+                      const SizedBox(height: AppSpacing.sm),
+                      SecondaryButton(
+                        label: 'تحويل هذه الشكوى إلى حادث',
+                        icon: Icons.warning_amber_rounded,
+                        loading: working,
+                        onPressed: () => perform(
+                          () => Api.instance.convertAccident(id),
+                          'تم تحويل السجل إلى حادث.',
+                        ),
+                      ),
+                    ],
+                    if (!fixed && !isVidangeSystem) ...[
+                      const SizedBox(height: AppSpacing.sm),
+                      SecondaryButton(
+                        label: status == AppStrings.inProgress
+                            ? 'إعادة إلى قيد الانتظار'
+                            : 'نقل إلى قيد التصليح',
+                        icon: status == AppStrings.inProgress
+                            ? Icons.undo_rounded
+                            : Icons.build_outlined,
+                        loading: working,
+                        onPressed: () => perform(
+                          () => Api.instance.setProblemStatus(
+                            id,
+                            status == AppStrings.inProgress
+                                ? AppStrings.waiting
+                                : AppStrings.inProgress,
+                          ),
+                          status == AppStrings.inProgress
+                              ? 'تمت إعادة الحالة إلى قيد الانتظار.'
+                              : 'تم نقل الشكوى إلى قيد التصليح.',
+                        ),
+                      ),
+                    ],
+                    if (!fixed && status == AppStrings.inProgress && !isVidangeSystem) ...[
+                      const SizedBox(height: AppSpacing.sm),
+                      PrimaryButton(
+                        label: 'تسجيل الإصلاح',
+                        icon: Icons.check_circle_outline_rounded,
+                        loading: working,
+                        onPressed: () => perform(
+                          () => Api.instance.fixProblem(id),
+                          'تم تسجيل الإصلاح.',
+                        ),
+                      ),
+                    ],
+                    if (fixed) ...[
+                      const SizedBox(height: AppSpacing.sm),
+                      const StatusChip(status: 'fixed', label: 'تم الإصلاح'),
+                    ],
+                    const SizedBox(height: AppSpacing.sm),
+                    DestructiveButton(
+                      label: 'حذف السجل',
+                      loading: working,
+                      onPressed: () async {
+                        final accepted = await ConfirmDialog.show(
+                          sheetContext,
+                          title: 'حذف السجل؟',
+                          message: 'سيتم حذف هذا السجل من قاعدة البيانات. لا يمكن التراجع عن هذا الإجراء.',
+                          confirmLabel: 'حذف',
+                          destructive: true,
+                        );
+                        if (accepted != true || !sheetContext.mounted) return;
+                        await perform(
+                          () => Api.instance.deleteProblem(id),
+                          'تم حذف السجل.',
+                        );
+                      },
+                    ),
+                  ],
+                ),
               ),
             ),
-          ),
-        ),
+          );
+        },
       ),
     );
     comment.dispose();
   }
 
-  Widget _metric(String label, dynamic value, {String suffix = ' KM'}) {
-    final shown = value == null ? 'غير متوفر' : '$value$suffix';
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 5),
-      child: Row(
-        children: [
-          Expanded(child: Text(label)),
-          Text(shown, style: const TextStyle(fontWeight: FontWeight.w700)),
-        ],
-      ),
-    );
-  }
-
-  Widget _empty(String text) => Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [const Icon(Icons.history, size: 38, color: Colors.grey), const SizedBox(height: 8), Text(text)],
-          ),
-        ),
-      );
-
   Future<void> _editVidange(Map<String, dynamic> current) async {
-    final old = current['last_vidange_km'];
-    final controller = TextEditingController(text: old?.toString() ?? '');
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('تعديل قيمة Vidange'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('المركبة: ${widget.vehicle}'),
-            Text('القيمة الحالية: ${old ?? 'غير مسجلة'} KM'),
-            Text('آخر قراءة مسجلة: ${current['latest_km'] ?? 'غير متوفرة'} KM'),
-            const SizedBox(height: 12),
-            TextField(
-              controller: controller,
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(labelText: 'القيمة الجديدة (KM)', border: OutlineInputBorder()),
+    final oldValue = _asInt(current['last_vidange_km']);
+    final lastReading = _asInt(current['latest_km']);
+    final controller = TextEditingController(text: oldValue?.toString() ?? '');
+    try {
+      final proceed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('تعديل قيمة Vidange'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('المركبة: ${widget.vehicle}'),
+                const SizedBox(height: AppSpacing.sm),
+                Text('القيمة الحالية: ${oldValue ?? 'غير مسجلة'} KM'),
+                Text('آخر قراءة: ${lastReading ?? 'غير متوفرة'} KM'),
+                const SizedBox(height: AppSpacing.md),
+                AppTextField(
+                  controller: controller,
+                  labelText: 'القيمة الجديدة (KM)',
+                  digitsOnly: true,
+                  keyboardType: TextInputType.number,
+                  textInputAction: TextInputAction.done,
+                ),
+              ],
             ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('إلغاء')),
+            FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('متابعة')),
           ],
         ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('إلغاء')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('متابعة')),
-        ],
-      ),
-    );
-    if (confirmed != true || !mounted) return;
-    final km = int.tryParse(controller.text.trim());
-    if (km == null || km < 0) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('أدخل قيمة كيلومترات صحيحة')));
-      return;
-    }
-    final accepted = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('تأكيد الحفظ'),
-        content: Text('القيمة السابقة: ${old ?? 'غير مسجلة'} KM\nالقيمة الجديدة: $km KM\nالقيمة القادمة المقترحة: ${km + 10000} KM'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('رجوع')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('تأكيد وحفظ')),
-        ],
-      ),
-    );
-    if (accepted != true || !mounted) return;
-    setState(() => savingVidange = true);
-    try {
-      final result = await Api.instance.setVidange(widget.vehicle, km);
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('تم الحفظ • التالي: ${result['next_vidange_km'] ?? km + 10000} KM')),
       );
-      await load();
-      if (mounted) setState(() => tab = 3);
-    } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر الحفظ: $e')));
+      if (proceed != true || !mounted) return;
+      final km = int.tryParse(controller.text.trim());
+      if (km == null || km < 0) {
+        AppSnackbar.error(context, 'أدخل قيمة كيلومترات صحيحة لا تقل عن صفر.');
+        return;
+      }
+      final accepted = await ConfirmDialog.show(
+        context,
+        title: 'تأكيد حفظ Vidange',
+        message: 'القيمة السابقة: ${oldValue ?? 'غير مسجلة'} KM\nالقيمة الجديدة: $km KM\nالقيمة القادمة: ${km + 10000} KM',
+        confirmLabel: 'تأكيد وحفظ',
+      );
+      if (accepted != true || !mounted) return;
+
+      setState(() => _savingVidange = true);
+      try {
+        final result = await Api.instance.setVidange(widget.vehicle, km);
+        if (!mounted) return;
+        AppSnackbar.success(
+          context,
+          'تم الحفظ. القيمة القادمة: ${result['next_vidange_km'] ?? km + 10000} KM',
+        );
+        await _load();
+        if (mounted) setState(() => _tab = 3);
+      } catch (error) {
+        if (mounted) AppSnackbar.error(context, friendlyError(error));
+      } finally {
+        if (mounted) setState(() => _savingVidange = false);
+      }
     } finally {
-      if (mounted) setState(() => savingVidange = false);
+      controller.dispose();
     }
+  }
+}
+
+class _VehicleSummary extends StatelessWidget {
+  const _VehicleSummary({
+    required this.vehicle,
+    required this.vehicleData,
+    required this.latest,
+    required this.readingCount,
+  });
+
+  final String vehicle;
+  final Map<String, dynamic>? vehicleData;
+  final Map<String, dynamic>? latest;
+  final int readingCount;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
+    final drivers = List<dynamic>.from(vehicleData?['drivers'] ?? const []);
+    final names = drivers.whereType<Map>()
+        .map((driver) => (driver['name'] ?? '').toString())
+        .where((name) => name.isNotEmpty)
+        .join(' • ');
+    final statusIcons = List<dynamic>.from(vehicleData?['status_icons'] ?? const []);
+    final km = latest == null ? null : _asInt(latest!['km']);
+    final date = latest?['date']?.toString().trim();
+    final driverName = latest?['driver_name']?.toString().trim();
+
+    return AppCard(
+      padding: const EdgeInsets.all(AppSpacing.md),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  color: colors.tint(colors.primary),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Icon(Icons.directions_car_filled_rounded, color: colors.primary),
+              ),
+              const SizedBox(width: AppSpacing.md),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Directionality(
+                      textDirection: TextDirection.ltr,
+                      child: Text(
+                        vehicle,
+                        style: AppText.section,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    Text(
+                      names.isEmpty ? 'السائق الحالي غير متوفر' : names,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: AppText.caption.copyWith(color: colors.textSecondary),
+                    ),
+                  ],
+                ),
+              ),
+              if (statusIcons.isNotEmpty)
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 70),
+                  child: StatusIcons(icons: statusIcons),
+                ),
+            ],
+          ),
+          const SizedBox(height: AppSpacing.md),
+          Divider(color: colors.border, height: 1),
+          const SizedBox(height: AppSpacing.md),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(Icons.speed_rounded, size: 19, color: colors.primary),
+              const SizedBox(width: AppSpacing.sm),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('آخر كيلومترات مسجلة', style: AppText.label.copyWith(color: colors.textSecondary)),
+                    const SizedBox(height: AppSpacing.xs),
+                    if (readingCount == 0)
+                      Text(AppStrings.noReadings, style: AppText.body.copyWith(color: colors.textSecondary))
+                    else
+                      Directionality(
+                        textDirection: TextDirection.ltr,
+                        child: Text(
+                          km == null ? 'قيمة غير صالحة' : '$km KM',
+                          style: AppText.title.copyWith(color: colors.textPrimary),
+                        ),
+                      ),
+                    if (readingCount > 0 && date != null && date.isNotEmpty)
+                      Directionality(
+                        textDirection: TextDirection.ltr,
+                        child: Text(
+                          date,
+                          style: AppText.caption.copyWith(color: colors.textSecondary),
+                        ),
+                      ),
+                    if (driverName != null && driverName.isNotEmpty)
+                      Text(
+                        'أدخلها السائق: $driverName',
+                        style: AppText.caption.copyWith(color: colors.textSecondary),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
   }
 }
