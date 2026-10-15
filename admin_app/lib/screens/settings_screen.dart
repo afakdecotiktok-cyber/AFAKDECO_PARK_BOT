@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:cross_file/cross_file.dart';
 import 'package:share_plus/share_plus.dart';
 import '../services/api.dart';
+import '../theme/app_colors.dart';
 
 class SettingsScreen extends StatefulWidget {
   final Future<void> Function() onLogout;
@@ -64,14 +65,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Directionality(
-      textDirection: TextDirection.rtl,
-      child: ListView(
+    return ListView(
         padding: const EdgeInsets.all(12),
         children: [
           const Text('الإعدادات والإدارة', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
           const SizedBox(height: 4),
-          const Text('تُنفّذ العمليات الإدارية عبر واجهة الخادم الحالية وتخضع لصلاحيات الحساب.', style: TextStyle(color: Colors.grey)),
+          Text('تُنفّذ العمليات الإدارية عبر واجهة الخادم الحالية وتخضع لصلاحيات الحساب.', style: TextStyle(color: AppColors.of(context).textSecondary)),
           const SizedBox(height: 12),
           Card(
             child: ListTile(
@@ -132,7 +131,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   },
                 ),
                 ListTile(
-                  leading: const Icon(Icons.delete_outline, color: Colors.red),
+                  leading: Icon(Icons.delete_outline, color: AppColors.of(context).pending),
                   title: const Text('حذف مركبة'),
                   trailing: const Icon(Icons.chevron_left),
                   onTap: busy ? null : () async {
@@ -246,7 +245,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           if (busy) const Padding(padding: EdgeInsets.all(12), child: Center(child: CircularProgressIndicator())),
         ],
-      ),
     );
   }
 
@@ -410,7 +408,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     subtitle: Text('ID: $id • ${a['role'] ?? 'admin'}'),
                     trailing: IconButton(
                       tooltip: 'حذف المشرف',
-                      icon: const Icon(Icons.delete_outline, color: Colors.red),
+                      icon: Icon(Icons.delete_outline, color: AppColors.of(ctx).pending),
                       onPressed: id.isEmpty ? null : () async {
                         final ok = await showDialog<bool>(
                           context: ctx,
