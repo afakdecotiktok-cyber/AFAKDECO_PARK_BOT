@@ -1,38 +1,114 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
   <defs>
-    <linearGradient id="cream" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFFDF7"/><stop offset="1" stop-color="#F4EEDC"/></linearGradient>
-    <linearGradient id="van" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFFFFF"/><stop offset="1" stop-color="#DCE5EE"/></linearGradient>
-    <linearGradient id="road" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#168C36"/><stop offset="1" stop-color="#45C84C"/></linearGradient>
-    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="6" stdDeviation="6" flood-color="#071B36" flood-opacity=".22"/></filter>
+    <!-- Drop Shadow for Depth -->
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#102A43" flood-opacity="0.15" />
+    </filter>
+    <filter id="vanShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="16" stdDeviation="12" flood-color="#102A43" flood-opacity="0.2" />
+    </filter>
   </defs>
-  <rect x="8" y="8" width="496" height="496" rx="94" fill="url(#cream)" stroke="#E2DDCF" stroke-width="3"/>
-  <path d="M25 318 C72 247 135 209 231 189 C284 177 320 186 366 211 C412 236 444 281 487 304 L487 380 L25 380Z" fill="url(#road)"/>
-  <path d="M53 309 C102 249 163 218 235 202" fill="none" stroke="#FFFFFF" stroke-width="7" stroke-linecap="round" stroke-dasharray="18 17"/>
-  <path d="M343 244 C397 266 434 304 469 333" fill="none" stroke="#FFFFFF" stroke-width="7" stroke-linecap="round" stroke-dasharray="18 17"/>
-  <g filter="url(#shadow)">
-    <path d="M84 290 L84 235 Q84 223 96 218 L126 207 L159 151 Q167 139 184 139 L302 139 Q319 139 330 154 L371 209 L403 220 Q417 225 417 241 L417 294 L84 294Z" fill="url(#van)" stroke="#C7D3DF" stroke-width="3" stroke-linejoin="round"/>
-    <path d="M171 155 L204 155 L204 207 L137 207Z" fill="#B9E2F2" stroke="#CBD7E1" stroke-width="3" stroke-linejoin="round"/>
-    <path d="M216 155 L300 155 Q309 155 316 165 L345 207 L216 207Z" fill="#173447" stroke="#CBD7E1" stroke-width="3" stroke-linejoin="round"/>
-    <path d="M94 231 L127 219 L127 272 L94 272Z" fill="#F8FBFD"/>
-    <path d="M137 219 L137 272 L397 272 L397 244 L367 231Z" fill="#FFFFFF"/>
-    <path d="M87 273 L414 273 L414 292 L87 292Z" fill="#293746"/>
-    <path d="M102 282 L126 282" stroke="#F6C34A" stroke-width="6" stroke-linecap="round"/>
-    <path d="M378 282 L400 282" stroke="#F6C34A" stroke-width="6" stroke-linecap="round"/>
-    <path d="M205 225 L205 262" stroke="#D1DCE5" stroke-width="3"/>
-    <path d="M300 225 L300 262" stroke="#D1DCE5" stroke-width="3"/>
-    <rect x="229" y="245" width="78" height="19" rx="5" fill="#F9FBFC" stroke="#D5DEE6" stroke-width="2"/>
-    <text x="268" y="259" font-family="Arial, sans-serif" font-size="11" font-weight="700" text-anchor="middle" fill="#253449">MASTER</text>
-    <circle cx="157" cy="293" r="29" fill="#172333" stroke="#F9FBFD" stroke-width="6"/>
-    <circle cx="157" cy="293" r="12" fill="#AEBCC9" stroke="#EAF0F5" stroke-width="3"/>
-    <circle cx="354" cy="293" r="29" fill="#172333" stroke="#F9FBFD" stroke-width="6"/>
-    <circle cx="354" cy="293" r="12" fill="#AEBCC9" stroke="#EAF0F5" stroke-width="3"/>
+
+  <!-- Background App Container -->
+  <rect x="64" y="64" width="896" height="896" rx="210" fill="#F7F3E8" stroke="#102A43" stroke-width="20" filter="url(#shadow)" />
+
+  <!-- Decorative Background Elements / Safe Area Grid Hint -->
+  <circle cx="512" cy="512" r="380" fill="none" stroke="#D8DEE5" stroke-width="2" stroke-dasharray="8 8" opacity="0.6" />
+
+  <!-- Location Pin (Background Element) -->
+  <g transform="translate(680, 240)" filter="url(#shadow)">
+    <!-- Pin Shadow/Glow -->
+    <ellipse cx="0" cy="190" rx="25" ry="10" fill="#102A43" opacity="0.2" />
+    <!-- Pin Body -->
+    <path d="M 0 0 C -45 0 -80 35 -80 80 C -80 135 0 190 0 190 C 0 190 80 135 80 80 C 80 35 45 0 0 0 Z" fill="#1769AA" />
+    <!-- Pin Inner Circle -->
+    <circle cx="0" cy="80" r="32" fill="#F7F3E8" />
+    <circle cx="0" cy="80" r="16" fill="#1769AA" />
   </g>
-  <g>
-    <path d="M256 38 C223 38 200 62 200 93 C200 129 256 170 256 170 C256 170 312 129 312 93 C312 62 289 38 256 38Z" fill="#0646B8"/>
-    <circle cx="256" cy="91" r="21" fill="#FFFDF7"/>
+
+  <!-- Curved Road -->
+  <path d="M 120 740 Q 512 600 904 740 L 904 840 Q 512 700 120 840 Z" fill="#36A66A" />
+  <!-- Road Center Dashes -->
+  <path d="M 180 775 Q 512 638 844 775" fill="none" stroke="#FFFFFF" stroke-width="8" stroke-dasharray="24 24" opacity="0.8" />
+
+  <!-- Brand Title: AFAK PARK -->
+  <text x="512" y="180" font-family="system-ui, -apple-system, &#39;Segoe UI&#39;, Roboto, Helvetica, Arial, sans-serif" font-weight="900" font-size="64" fill="#102A43" letter-spacing="10" text-anchor="middle">AFAK PARK</text>
+
+  <!-- Central Subject: Modern Renault Master Delivery Van (Front Three-Quarter View) -->
+  <g transform="translate(160, 310)" filter="url(#vanShadow)">
+    <!-- Van Ground Shadow -->
+    <ellipse cx="352" cy="370" rx="310" ry="24" fill="#102A43" opacity="0.25" />
+
+    <!-- Rear/Underbody Base -->
+    <path d="M 100 320 L 590 320 L 620 350 L 80 350 Z" fill="#102A43" />
+
+    <!-- Tires -->
+    <!-- Rear Tire -->
+    <g transform="translate(220, 335)">
+      <rect x="-45" y="-45" width="90" height="90" rx="30" fill="#102A43" />
+      <circle cx="0" cy="0" r="28" fill="#D8DEE5" />
+      <circle cx="0" cy="0" r="12" fill="#102A43" />
+    </g>
+    <!-- Front Tire -->
+    <g transform="translate(530, 335)">
+      <rect x="-45" y="-45" width="90" height="90" rx="30" fill="#102A43" />
+      <circle cx="0" cy="0" r="28" fill="#D8DEE5" />
+      <circle cx="0" cy="0" r="12" fill="#102A43" />
+    </g>
+
+    <!-- Main Van Body (White Panel Van) -->
+    <!-- Lower Body & Side Panel -->
+    <path d="M 80 180 
+             L 380 140 
+             L 600 200 
+             L 620 330 
+             L 80 330 Z" fill="#FFFFFF" />
+
+    <!-- High Roof Structure -->
+    <path d="M 120 180 
+             L 360 80 
+             L 520 110 
+             L 580 200 
+             L 120 180 Z" fill="#F4F6F8" />
+
+    <!-- Roof Panel Line / Shading -->
+    <path d="M 360 80 L 520 110 L 580 200 L 380 140 Z" fill="#EAEFF4" />
+
+    <!-- Front Grille & Bumper Section -->
+    <path d="M 520 220 
+             L 610 240 
+             L 620 330 
+             L 520 330 Z" fill="#102A43" />
+
+    <!-- Grille Details (Horizontal Slats) -->
+    <line x1="540" y1="260" x2="595" y2="270" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round" />
+    <line x1="545" y1="280" x2="600" y2="290" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round" />
+    <line x1="550" y1="300" x2="605" y2="310" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round" />
+
+    <!-- Renault Diamond Emblem on Grille -->
+    <polygon points="572,235 584,250 572,265 560,250" fill="#FFFFFF" />
+
+    <!-- Headlight (Front) -->
+    <path d="M 600 215 C 605 215 615 220 618 235 L 610 240 L 595 218 Z" fill="#D8DEE5" />
+
+    <!-- Windshield -->
+    <path d="M 390 145 
+             L 515 118 
+             L 535 215 
+             L 390 220 Z" fill="#102A43" />
+
+    <!-- Side Windows (Driver Cab) -->
+    <path d="M 230 160 
+             L 375 148 
+             L 375 225 
+             L 215 220 Z" fill="#102A43" />
+    
+    <!-- Side Door Seam & Panel Lines -->
+    <line x1="390" y1="145" x2="390" y2="330" stroke="#D8DEE5" stroke-width="4" />
+    <line x1="220" y1="220" x2="600" y2="220" stroke="#D8DEE5" stroke-width="4" />
+    <path d="M 270 240 L 350 240 L 350 310 L 270 310 Z" fill="none" stroke="#D8DEE5" stroke-width="3" />
+
+    <!-- Side Cargo Panel Indentation -->
+    <rect x="80" y="240" width="160" height="70" rx="10" fill="none" stroke="#D8DEE5" stroke-width="4" />
   </g>
-  <path d="M67 397 Q256 363 445 397 L445 407 Q256 382 67 407Z" fill="#FFFFFF" opacity=".9"/>
-  <text x="256" y="426" font-family="Arial, Helvetica, sans-serif" font-size="58" font-weight="900" letter-spacing="-1" text-anchor="middle" fill="#0646B8">AFAK</text>
-  <path d="M95 445 L167 445 M345 445 L417 445" stroke="#0646B8" stroke-width="5" stroke-linecap="round"/>
-  <text x="256" y="465" font-family="Arial, Helvetica, sans-serif" font-size="30" font-weight="800" letter-spacing="8" text-anchor="middle" fill="#0646B8">PARK</text>
 </svg>
