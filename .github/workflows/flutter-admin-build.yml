@@ -58,6 +58,44 @@ jobs:
           grep -q 'android.permission.INTERNET' android/app/src/main/AndroidManifest.xml
           rm -f test/widget_test.dart
 
+      - name: Generate AFAK PARK launcher icons
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y librsvg2-bin
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+
+          source = Path("assets/afak_park_icon.svg")
+          if not source.exists():
+              raise SystemExit(f"Missing launcher icon source: {source}")
+          res = Path("android/app/src/main/res")
+          sizes = {
+              "mipmap-mdpi": 48,
+              "mipmap-hdpi": 72,
+              "mipmap-xhdpi": 96,
+              "mipmap-xxhdpi": 144,
+              "mipmap-xxxhdpi": 192,
+          }
+          for folder, size in sizes.items():
+              target_dir = res / folder
+              target_dir.mkdir(parents=True, exist_ok=True)
+              target = target_dir / "ic_launcher.png"
+              subprocess.run(
+                  ["rsvg-convert", "-w", str(size), "-h", str(size), "-o", str(target), str(source)],
+                  check=True,
+              )
+              (target_dir / "ic_launcher_round.png").write_bytes(target.read_bytes())
+          # Use density-specific raster icons instead of Flutter's generated adaptive icon.
+          (res / "mipmap-anydpi-v26").mkdir(exist_ok=True)
+          adaptive = res / "mipmap-anydpi-v26"
+          for name in ("ic_launcher.xml", "ic_launcher_round.xml"):
+              path = adaptive / name
+              if path.exists():
+                  path.unlink()
+          print("Generated AFAK PARK icons for all Android densities.")
+          PY
+
       - name: Install dependencies
         run: flutter pub get
 
